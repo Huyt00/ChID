@@ -23,7 +23,6 @@ import os
 import sys
 from dataclasses import dataclass, field
 from typing import Optional, Union
-import random
 
 import datasets
 import numpy as np
@@ -348,7 +347,7 @@ def main():
     # The idiom tag of each instance will be replaced with 4 [MASK] tokens.
     def preprocess_function_resize(examples):
         return_dic = {}
-        return_dic_keys = ['candidates', 'content', 'synonyms', 'explaination', 'exp embedding', 'labels', 'labels_syn']
+        return_dic_keys = ['candidates', 'content', 'labels']
         for k in return_dic_keys:
             return_dic[k] = []
 
@@ -359,18 +358,9 @@ def main():
                 return_dic['candidates'].append(examples['candidates'][i][j])
                 idx = text.find(idiom_tag, idx+1)
                 return_dic['content'].append(text[:idx] + tokenizer.mask_token*4 + text[idx+len(idiom_tag):])
-                synonyms = examples['groundTruth'][i][j] + examples['synonyms'][i][j]
-                examples['synonyms'][i][j] = random.shuffle(synonyms)
-                return_dic['synonyms'].append(examples['synonyms'][i][j])
-                return_dic['explaination'].append(examples['explaination'][i][j])
-                return_dic['exp embedding'].append(examples['exp embedding'][i][j])
                 for k, candidate in enumerate(examples['candidates'][i][j]):
                     if candidate == examples['groundTruth'][i][j]:
                         return_dic['labels'].append(k)
-                        break
-                for k, candidate in enumerate(examples['synonyms'][i][j]):
-                    if candidate == examples['groundTruth'][i][j]:
-                        return_dic['labels_syn'].append(k)
                         break
         return return_dic
 
