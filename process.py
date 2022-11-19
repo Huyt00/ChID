@@ -112,7 +112,7 @@ def add_exp_cls(dir):
             index += 1
     
     assert index == len(embedding)  
-    return json_data    
+    return data_set  
 
 def process():
     dirs = os.listdir('./ChID')

@@ -24,10 +24,14 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional, Union
 import random
+from tqdm import tqdm, trange
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import datasets
 import numpy as np
 import torch
+from torch.utils.data import TensorDataset,Dataset,DataLoader,random_split
 from datasets import load_dataset
 from model import BertForChID
 
@@ -47,6 +51,7 @@ from transformers.trainer_utils import get_last_checkpoint
 
 
 logger = logging.getLogger(__name__)
+_model_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @dataclass
@@ -190,8 +195,10 @@ class DataCollatorForChID:
     pad_to_multiple_of: Optional[int] = None
 
     def __call__(self, features):
-        label_name = "label" if "label" in features[0].keys() else "labels"
-        labels = [feature.pop(label_name) for feature in features]
+        label_name = "label" if "label" in features.keys() else "labels"
+        label_syn_name = "label_syn" if "label_syn" in features.keys() else "labels_syn"
+        labels = features.pop(label_name)
+        labels_syn = features.pop(label_syn_name)
 
         batch = self.tokenizer.pad(
             features,
@@ -204,6 +211,7 @@ class DataCollatorForChID:
 
         # Add back labels
         batch["labels"] = torch.tensor(labels, dtype=torch.int64)
+        batch["labels_syn"] = torch.tensor(labels_syn, dtype=torch.int64)
         # Compute candidate masks
         batch["candidate_mask"] = batch["input_ids"] == self.tokenizer.mask_token_id
         return batch
@@ -321,7 +329,8 @@ def main():
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
-    )
+    ).to(_model_device)
+    optimizer = torch.optim.Adam(params = model.parameters(),lr=training_args.learning_rate)
 
     label_column_name = "labels"
     idiom_tag = '#idiom#'
@@ -348,7 +357,7 @@ def main():
     # The idiom tag of each instance will be replaced with 4 [MASK] tokens.
     def preprocess_function_resize(examples):
         return_dic = {}
-        return_dic_keys = ['candidates', 'content', 'synonyms', 'explaination', 'exp embedding', 'labels', 'labels_syn']
+        return_dic_keys = ['candidates', 'content', 'synonyms', 'synonyms_mask', 'explaination', 'exp embedding', 'labels', 'labels_syn']
         for k in return_dic_keys:
             return_dic[k] = []
 
@@ -359,8 +368,17 @@ def main():
                 return_dic['candidates'].append(examples['candidates'][i][j])
                 idx = text.find(idiom_tag, idx+1)
                 return_dic['content'].append(text[:idx] + tokenizer.mask_token*4 + text[idx+len(idiom_tag):])
-                synonyms = examples['groundTruth'][i][j] + examples['synonyms'][i][j]
-                examples['synonyms'][i][j] = random.shuffle(synonyms)
+                examples['synonyms'][i][j] = [examples['groundTruth'][i][j]] + examples['synonyms'][i][j]
+                # examples['synonyms'][i][j] = ([exa for exa in examples['synonyms'][i][j] if len(exa)==4] \
+                #                             + [[0]*4]*7)[:7]
+                # random.shuffle(examples['synonyms'][i][j])
+                examples['synonyms'][i][j] = [exa for exa in examples['synonyms'][i][j] if len(exa)==4][:7]
+                random.shuffle(examples['synonyms'][i][j])
+                
+                syn_len = len(examples['synonyms'][i][j])
+                return_dic['synonyms_mask'].append([1]*syn_len+[0]*(7-syn_len))
+                # examples['synonyms_mask'][i][j] = len(examples['synonyms'][i][j][:7])
+                examples['synonyms'][i][j] = (examples['synonyms'][i][j] + [[tokenizer.mask_token]*4]*7)[:7]
                 return_dic['synonyms'].append(examples['synonyms'][i][j])
                 return_dic['explaination'].append(examples['explaination'][i][j])
                 return_dic['exp embedding'].append(examples['exp embedding'][i][j])
@@ -393,11 +411,29 @@ def main():
             padding="max_length" if data_args.pad_to_max_length else False,
             truncation=True,
         )
-        tokenized_examples["labels"] = labels
+        tokenized_examples["labels"] = examples['labels']
         tokenized_candidates = [[tokenizer.convert_tokens_to_ids(list(candidate)) for candidate in candidates]for candidates in examples['candidates']]
         tokenized_examples["candidates"] = tokenized_candidates
-        return tokenized_examples
-
+        
+        tokenized_examples["labels_syn"] = examples['labels_syn']
+        # examples["synonyms"] = [(syn+[[0,0,0,0]]*7)[:7] for syn in examples["synonyms"]]
+        tokenized_synonyms = [[tokenizer.convert_tokens_to_ids(list(synonym)) for synonym in synonyms]for synonyms in examples['synonyms']]
+        tokenized_examples["synonyms"] = tokenized_synonyms
+        tokenized_examples["synonyms_mask"] = examples['synonyms_mask']
+        
+        tokenized_examples["position"] = [l.index(tokenizer.mask_token_id) for l in tokenized_examples["input_ids"]]
+        
+        # Data collator
+        data_collator = (
+            default_data_collator
+            if data_args.pad_to_max_length
+            else DataCollatorForChID(tokenizer=tokenizer, pad_to_multiple_of=8 if training_args.fp16 else None)
+        )
+    
+        data_set = data_collator(tokenized_examples.data).data
+        keys = list(data_set.keys())
+        data_set = TensorDataset(data_set['input_ids'], data_set['token_type_ids'], data_set['attention_mask'], data_set['candidates'], data_set['synonyms'], data_set['synonyms_mask'], data_set['position'], data_set['labels'], data_set['labels_syn'], data_set['candidate_mask'], )
+        return data_set, keys
 
     if training_args.do_train:
         if "train" not in raw_datasets:
@@ -406,116 +442,96 @@ def main():
         if data_args.max_train_samples is not None:
             max_train_samples = min(len(train_dataset), data_args.max_train_samples)
             train_dataset = train_dataset.select(range(max_train_samples))
-        with training_args.main_process_first(desc="train dataset map pre-processing"):
-            train_dataset = train_dataset.map(
-                preprocess_function_resize,
-                batched=True,
-                remove_columns=["groundTruth", "realCount"],
-                num_proc=data_args.preprocessing_num_workers,
-                load_from_cache_file=not data_args.overwrite_cache,
-            )
-
-            train_dataset = train_dataset.map(
-                preprocess_function_tokenize,
-                batched=True,
-                num_proc=data_args.preprocessing_num_workers,
-                load_from_cache_file=not data_args.overwrite_cache,
-            )
-            # for index in range(3):
-            #     logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
+            
+        logger.info("train dataset map pre-processing")
+        train_dataset = {k:[d[k] for d in train_dataset] for k in train_dataset.column_names}
+        train_dataset = preprocess_function_resize(train_dataset)
+        train_dataset, keys = preprocess_function_tokenize(train_dataset)
+        train_data_loader = DataLoader(train_dataset, batch_size=training_args.per_device_train_batch_size, shuffle=False)
     if training_args.do_eval:
         if "validation" not in raw_datasets:
             raise ValueError("--do_eval requires a validation dataset")
+        
         eval_dataset = raw_datasets["validation"]
         if data_args.max_eval_samples is not None:
             max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
             eval_dataset = eval_dataset.select(range(max_eval_samples))
-        with training_args.main_process_first(desc="validation dataset map pre-processing"):
-            eval_dataset = eval_dataset.map(
-                preprocess_function_resize,
-                batched=True,
-                remove_columns=["groundTruth", "realCount"],
-                num_proc=data_args.preprocessing_num_workers,
-                load_from_cache_file=not data_args.overwrite_cache,
-            )
-            eval_dataset = eval_dataset.map(
-                preprocess_function_tokenize,
-                batched=True,
-                num_proc=data_args.preprocessing_num_workers,
-                load_from_cache_file=not data_args.overwrite_cache,
-            )
+        logger.info("validation dataset map pre-processing")
+        eval_dataset = {k:[d[k] for d in eval_dataset] for k in eval_dataset.column_names}
+        eval_dataset = preprocess_function_resize(eval_dataset)
+        eval_dataset, keys = preprocess_function_tokenize(eval_dataset)
+        eval_data_loader = DataLoader(eval_dataset, batch_size=training_args.per_device_eval_batch_size, shuffle=False)
+        
         test_dataset = raw_datasets["test"]
-        with training_args.main_process_first(desc="test dataset map pre-processing"):
-            test_dataset = test_dataset.map(
-                preprocess_function_resize,
-                batched=True,
-                remove_columns=["groundTruth", "realCount"],
-                num_proc=data_args.preprocessing_num_workers,
-                load_from_cache_file=not data_args.overwrite_cache,
-            )
-            test_dataset = test_dataset.map(
-                preprocess_function_tokenize,
-                batched=True,
-                num_proc=data_args.preprocessing_num_workers,
-                load_from_cache_file=not data_args.overwrite_cache,
-            )
-    # Data collator
-    data_collator = (
-        default_data_collator
-        if data_args.pad_to_max_length
-        else DataCollatorForChID(tokenizer=tokenizer, pad_to_multiple_of=8 if training_args.fp16 else None)
-    )
-    # data_collator = default_data_collator
-
+        logger.info("test dataset map pre-processing")
+        test_dataset = {k:[d[k] for d in test_dataset] for k in test_dataset.column_names}
+        test_dataset = preprocess_function_resize(test_dataset)
+        test_dataset, keys = preprocess_function_tokenize(test_dataset)
+        test_data_loader = DataLoader(test_dataset, batch_size=training_args.per_device_eval_batch_size, shuffle=False)
 
 
     # Metric
-    def compute_metrics(eval_predictions):
-        predictions, label_ids = eval_predictions
+    def compute_metrics(predictions, label_ids):
+        predictions, label_ids = predictions.detach().cpu().numpy(), label_ids.detach().cpu().numpy()
         preds = np.argmax(predictions, axis=1)
-        return {"accuracy": (preds == label_ids).astype(np.float32).mean().item()}
-
-    # Initialize our Trainer
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset if training_args.do_train else None,
-        eval_dataset=eval_dataset if training_args.do_eval else None,
-        tokenizer=tokenizer,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics,
-    )
+        return {"accuracy": (preds == label_ids).astype(np.float32).sum().item()}
 
 
     # Training
     if training_args.do_train:
+        model.train()
+        # TODO
         checkpoint = None
         if training_args.resume_from_checkpoint is not None:
             checkpoint = training_args.resume_from_checkpoint
         elif last_checkpoint is not None:
             checkpoint = last_checkpoint
-        train_result = trainer.train(resume_from_checkpoint=checkpoint)
-        trainer.save_model()  # Saves the tokenizer too for easy upload
-        metrics = train_result.metrics
+        
+        for epoch in range(training_args.num_train_epochs):
+            total_loss = 0.
+            total_correct = 0.
+            total_num = 0.
+            step = 0
+            for batch in train_data_loader:
+                step += 1
+                optimizer.zero_grad()
+                
+                input = dict(zip(keys,batch))
+                loss, logits, labels = model(is_train=True, **input)
+                
+                loss.backward()
+                optimizer.step()
+                
+                metrics = compute_metrics(logits, labels)
+                total_loss += loss
+                total_correct += metrics["accuracy"]
+                total_num += len(labels)
+                
+                rate = step / len(train_data_loader)
+                a = "*" * int(rate * 50)
+                b = "." * int((1 - rate) * 50)
+                print("\rtrain loss: {:^3.0f}%[{}->{}] loss: {:.4f}  accuracy: {:.4f}".format(int(rate*100), a, b, loss, metrics["accuracy"]*1.0/len(labels)), end="")
 
-        max_train_samples = (
-            data_args.max_train_samples if data_args.max_train_samples is not None else len(train_dataset)
-        )
-        metrics["train_samples"] = min(max_train_samples, len(train_dataset))
-
-        trainer.log_metrics("train", metrics)
-        trainer.save_metrics("train", metrics)
-        trainer.save_state()
+                
+            logger.info("epoch: {:.0f} loss: {:.4f}  accuracy: {:.4f}".format(epoch+1, total_loss, total_correct/total_num))
 
     # Evaluation
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
 
-        metrics = trainer.evaluate(eval_dataset=test_dataset)
-        metrics["test_samples"] = len(test_dataset)
-
-        trainer.log_metrics("test", metrics)
-        trainer.save_metrics("test", metrics)
+        model.eval()
+        total_correct = 0.
+        total_num = 0.
+        for batch in tqdm(test_data_loader):
+            
+            input = dict(zip(keys,batch))
+            loss, logits, labels = model(is_train=False, **input)
+            
+            metrics = compute_metrics(logits, labels)
+            total_correct += metrics["accuracy"]
+            total_num += len(labels)
+            
+        logger.info("test accuracy: {:.4f}".format(total_correct/total_num))
 
     # kwargs = dict(
     #     finetuned_from=model_args.model_name_or_path,
