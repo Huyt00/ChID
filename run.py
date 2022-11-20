@@ -26,7 +26,7 @@ from typing import Optional, Union
 import random
 from tqdm import tqdm, trange
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 import datasets
 import numpy as np
@@ -330,7 +330,19 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     ).to(_model_device)
-    optimizer = torch.optim.Adam(params = model.parameters(),lr=training_args.learning_rate)
+    param_optimizer = list(model.named_parameters())
+    no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in param_optimizer
+                    if not any(nd in n for nd in no_decay) and 'bert' in n], 'weight_decay': 0.01, 'lr': 5e-5},
+        {'params': [p for n, p in param_optimizer
+                    if any(nd in n for nd in no_decay) and 'bert' in n], 'weight_decay': 0.0, 'lr': 5e-5},
+        {'params': [p for n, p in param_optimizer
+                    if not any(nd in n for nd in no_decay) and 'bert' not in n], 'weight_decay': 0.01, 'lr': training_args.learning_rate},
+        {'params': [p for n, p in param_optimizer
+                    if any(nd in n for nd in no_decay) and 'bert' not in n], 'weight_decay': 0.0, 'lr': training_args.learning_rate}
+    ]
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, training_args.learning_rate)
 
     label_column_name = "labels"
     idiom_tag = '#idiom#'
@@ -412,7 +424,8 @@ def main():
             truncation=True,
         )
         tokenized_examples["labels"] = examples['labels']
-        tokenized_candidates = [[tokenizer.convert_tokens_to_ids(list(candidate)) for candidate in candidates]for candidates in examples['candidates']]
+        # tokenized_candidates = [[tokenizer.convert_tokens_to_ids(list(candidate)) for candidate in candidates]for candidates in examples['candidates']]
+        tokenized_candidates = [[tokenizer(candidate).input_ids for candidate in candidates]for candidates in examples['candidates']]
         tokenized_examples["candidates"] = tokenized_candidates
         
         tokenized_examples["labels_syn"] = examples['labels_syn']

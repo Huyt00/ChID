@@ -12,8 +12,8 @@ from typing import Optional, Tuple, Union
 
 class BertForChID(BertPreTrainedModel):
 
-    _keys_to_ignore_on_load_unexpected = [r"pooler"]
-    _keys_to_ignore_on_load_missing = [r"position_ids", r"predictions.decoder.bias"]
+    # _keys_to_ignore_on_load_unexpected = [r"pooler"]
+    # _keys_to_ignore_on_load_missing = [r"position_ids", r"predictions.decoder.bias"]
 
     def __init__(self, config):
         super().__init__(config)
@@ -32,8 +32,10 @@ class BertForChID(BertPreTrainedModel):
         self.loss_func = torch.nn.CrossEntropyLoss()
         self._model_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # self._model_device = "cpu"
-        self.W_blank = nn.Linear(768, 50)
-        self.W_idiom = nn.Linear(768, 50)
+        self.W_blank = nn.Linear(768, 500)
+        self.W_blank.requires_grad_= True
+        self.W_idiom = nn.Linear(768, 500)
+        self.W_idiom.requires_grad_= True
         self.dropout = nn.Dropout(0.0)
         
         # self.bert_for_idiom.requires_grad_ = False
@@ -86,7 +88,6 @@ class BertForChID(BertPreTrainedModel):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         len = input_ids.shape[1]
-
         outputs_blank = self.bert(
             input_ids.to(self._model_device),
             attention_mask=attention_mask.to(self._model_device),
@@ -136,8 +137,10 @@ class BertForChID(BertPreTrainedModel):
         candidate_output = self.dropout(candidate_output)
 
         sim1 = torch.sum(sequence_output*candidate_output, dim=-1)
-        score1 = torch.softmax(sim1, dim=-1)
+        score1 = sim1
+        # score1 = torch.softmax(sim1, dim=-1)
         loss1 = self.loss_func(score1, labels.to(self._model_device))
+        # print(torch.sum(self.W_idiom.weight.grad))
         
         if not is_train:
             return loss1, score1, labels
