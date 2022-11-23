@@ -26,7 +26,7 @@ from typing import Optional, Union
 import random
 from tqdm import tqdm, trange
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import datasets
 import numpy as np
@@ -532,47 +532,47 @@ def main():
                 total_num += len(labels)
                 
                 rate = step / len(train_data_loader)
-                a = "*" * int(rate * 50)
-                b = "." * int((1 - rate) * 50)
-                print("\rtrain loss: {:^3.0f}%[{}->{}] loss: {:.4f}  accuracy: {:.4f}".format(int(rate*100), a, b, loss, metrics["accuracy"]*1.0/len(labels)), end="")
+                # a = "*" * int(rate * 50)
+                # b = "." * int((1 - rate) * 50)
+                # print("\rtrain loss: {:^3.0f}%[{}->{}] loss: {:.4f}  accuracy: {:.4f}".format(int(rate*100), a, b, loss, metrics["accuracy"]*1.0/len(labels)), end="")
 
                 
             logger.info("\nepoch: {:.0f} loss: {:.4f}  accuracy: {:.4f}".format(epoch+1, total_loss, total_correct/total_num))
             
             # eval
             # model.eval()
-            # total_correct = 0.
-            # total_num = 0.
-            # for batch in tqdm(eval_data_loader):
+            total_correct = 0.
+            total_num = 0.
+            for batch in eval_data_loader:
                 
-            #     input = dict(zip(keys,batch))
-            #     loss, logits, labels = model(is_train=False, **input)
+                input = dict(zip(keys,batch))
+                loss, logits, labels = model(is_train=False, **input)
                 
-            #     metrics = compute_metrics(logits, labels)
-            #     total_correct += metrics["accuracy"]
-            #     total_num += len(labels)
+                metrics = compute_metrics(logits, labels)
+                total_correct += metrics["accuracy"]
+                total_num += len(labels)
                 
-            # logger.info("eval accuracy: {:.4f}".format(total_correct/total_num))
-            # if max_acc < total_correct/total_num:
-            #     save_trained_model(training_args.output_dir, model)
-            # model.train()
+            logger.info("eval accuracy: {:.4f}".format(total_correct/total_num))
+            if max_acc < total_correct/total_num:
+                save_trained_model(training_args.output_dir, model)
+            model.train()
 
     # Evaluation
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
 
-        # model = BertForChID.from_pretrained(
-        #     training_args.output_dir,
-        #     from_tf=bool(".ckpt" in training_args.output_dir),
-        #     config=config,
-        #     cache_dir=model_args.cache_dir,
-        #     revision=model_args.model_revision,
-        #     use_auth_token=True if model_args.use_auth_token else None,
-        # ).to(_model_device)
+        model = BertForChID.from_pretrained(
+            training_args.output_dir,
+            from_tf=bool(".ckpt" in training_args.output_dir),
+            config=config,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            use_auth_token=True if model_args.use_auth_token else None,
+        ).to(_model_device)
         # model.eval()
         total_correct = 0.
         total_num = 0.
-        for batch in tqdm(test_data_loader):
+        for batch in test_data_loader:
             
             input = dict(zip(keys,batch))
             loss, logits, labels = model(is_train=False, **input)
