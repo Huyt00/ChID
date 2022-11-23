@@ -26,17 +26,16 @@ from typing import Optional, Union
 import random
 from tqdm import tqdm, trange
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = '1'
 
 import datasets
 import numpy as np
 import torch
 from torch.utils.data import TensorDataset,Dataset,DataLoader,random_split
 from datasets import load_dataset
-from model import BertForChID
+from model_lyg import BertForChID
 
 import transformers
-from transformers.file_utils import PYTORCH_PRETRAINED_BERT_CACHE, WEIGHTS_NAME, CONFIG_NAME
 from transformers import (
     AutoConfig,
     AutoTokenizer,
@@ -48,7 +47,6 @@ from transformers import (
 )
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.trainer_utils import get_last_checkpoint
-from transformers import AdamW, get_linear_schedule_with_warmup
 
 
 
@@ -332,20 +330,6 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     ).to(_model_device)
-    # param_optimizer = list(model.named_parameters())
-    # no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    # optimizer_grouped_parameters = [
-    #     {'params': [p for n, p in param_optimizer
-    #                 if not any(nd in n for nd in no_decay) and 'bert' in n], 'weight_decay': 0.01, 'lr': 1e-5},
-    #     {'params': [p for n, p in param_optimizer
-    #                 if any(nd in n for nd in no_decay) and 'bert' in n], 'weight_decay': 0.0, 'lr': 1e-5},
-    #     {'params': [p for n, p in param_optimizer
-    #                 if not any(nd in n for nd in no_decay) and 'bert' not in n], 'weight_decay': 0.01, 'lr': training_args.learning_rate},
-    #     {'params': [p for n, p in param_optimizer
-    #                 if any(nd in n for nd in no_decay) and 'bert' not in n], 'weight_decay': 0.0, 'lr': training_args.learning_rate}
-    # ]
-    # optimizer = torch.optim.AdamW(optimizer_grouped_parameters, training_args.learning_rate)
-    # optimizer = torch.optim.AdamW(model.parameters(), training_args.learning_rate)
     optimizer = torch.optim.Adam(params = model.parameters(),lr=1e-4)
 
     label_column_name = "labels"
@@ -373,7 +357,7 @@ def main():
     # The idiom tag of each instance will be replaced with 4 [MASK] tokens.
     def preprocess_function_resize(examples):
         return_dic = {}
-        return_dic_keys = ['candidates', 'content', 'synonyms', 'synonyms_mask', 'explaination', 'exp embedding', 'labels', 'labels_syn']
+        return_dic_keys = ['candidates', 'content', 'synonyms', 'explaination', 'exp embedding', 'labels', 'labels_syn']
         for k in return_dic_keys:
             return_dic[k] = []
 
@@ -385,25 +369,22 @@ def main():
                 idx = text.find(idiom_tag, idx+1)
                 return_dic['content'].append(text[:idx] + tokenizer.mask_token*4 + text[idx+len(idiom_tag):])
                 examples['synonyms'][i][j] = [examples['groundTruth'][i][j]] + examples['synonyms'][i][j]
-                # examples['synonyms'][i][j] = ([exa for exa in examples['synonyms'][i][j] if len(exa)==4] \
-                #                             + [[0]*4]*7)[:7]
-                # random.shuffle(examples['synonyms'][i][j])
-                examples['synonyms'][i][j] = [exa for exa in examples['synonyms'][i][j] if len(exa)==4][:7]
+                ### 把近义词也设置成和候选词一样的7个，空余部分用[MASK][MASK][MASK][MASK]填充
+                examples['synonyms'][i][j] = ([exa for exa in examples['synonyms'][i][j] if len(exa)==4] \
+                                            + [[tokenizer.mask_token]*4]*7)[:7]
                 random.shuffle(examples['synonyms'][i][j])
-                
-                syn_len = len(examples['synonyms'][i][j])
-                return_dic['synonyms_mask'].append([1]*syn_len+[0]*(7-syn_len))
-                # examples['synonyms_mask'][i][j] = len(examples['synonyms'][i][j][:7])
-                examples['synonyms'][i][j] = (examples['synonyms'][i][j] + [[tokenizer.mask_token]*4]*7)[:7]
                 return_dic['synonyms'].append(examples['synonyms'][i][j])
                 return_dic['explaination'].append(examples['explaination'][i][j])
+                #### examples里面没有exp embedding
                 return_dic['exp embedding'].append(examples['exp embedding'][i][j])
                 for k, candidate in enumerate(examples['candidates'][i][j]):
                     if candidate == examples['groundTruth'][i][j]:
+                        # labels记录candidates中正确值的索引
                         return_dic['labels'].append(k)
                         break
                 for k, candidate in enumerate(examples['synonyms'][i][j]):
                     if candidate == examples['groundTruth'][i][j]:
+                        # labels_syn记录synonyms中正确值的索引
                         return_dic['labels_syn'].append(k)
                         break
         return return_dic
@@ -428,15 +409,13 @@ def main():
             truncation=True,
         )
         tokenized_examples["labels"] = examples['labels']
-        # tokenized_candidates = [[tokenizer.convert_tokens_to_ids(list(candidate)) for candidate in candidates]for candidates in examples['candidates']]
-        tokenized_candidates = [[tokenizer(candidate).input_ids for candidate in candidates]for candidates in examples['candidates']]
+        tokenized_candidates = [[tokenizer.convert_tokens_to_ids(list(candidate)) for candidate in candidates]for candidates in examples['candidates']]
         tokenized_examples["candidates"] = tokenized_candidates
         
         tokenized_examples["labels_syn"] = examples['labels_syn']
         # examples["synonyms"] = [(syn+[[0,0,0,0]]*7)[:7] for syn in examples["synonyms"]]
         tokenized_synonyms = [[tokenizer.convert_tokens_to_ids(list(synonym)) for synonym in synonyms]for synonyms in examples['synonyms']]
         tokenized_examples["synonyms"] = tokenized_synonyms
-        tokenized_examples["synonyms_mask"] = examples['synonyms_mask']
         
         tokenized_examples["position"] = [l.index(tokenizer.mask_token_id) for l in tokenized_examples["input_ids"]]
         
@@ -449,7 +428,7 @@ def main():
     
         data_set = data_collator(tokenized_examples.data).data
         keys = list(data_set.keys())
-        data_set = TensorDataset(data_set['input_ids'], data_set['token_type_ids'], data_set['attention_mask'], data_set['candidates'], data_set['synonyms'], data_set['synonyms_mask'], data_set['position'], data_set['labels'], data_set['labels_syn'], data_set['candidate_mask'], )
+        data_set = TensorDataset(data_set['input_ids'], data_set['token_type_ids'], data_set['attention_mask'], data_set['candidates'], data_set['synonyms'], data_set['position'], data_set['labels'], data_set['labels_syn'], data_set['candidate_mask'], )
         return data_set, keys
 
     if training_args.do_train:
@@ -464,7 +443,7 @@ def main():
         train_dataset = {k:[d[k] for d in train_dataset] for k in train_dataset.column_names}
         train_dataset = preprocess_function_resize(train_dataset)
         train_dataset, keys = preprocess_function_tokenize(train_dataset)
-        train_data_loader = DataLoader(train_dataset, batch_size=training_args.per_device_train_batch_size, shuffle=False)
+        train_data_loader = DataLoader(train_dataset, batch_size=training_args.per_device_train_batch_size, shuffle=True)
     if training_args.do_eval:
         if "validation" not in raw_datasets:
             raise ValueError("--do_eval requires a validation dataset")
@@ -495,12 +474,8 @@ def main():
 
 
     # Training
-    num_train_optimization_steps = len(train_data_loader)
-    scheduler = get_linear_schedule_with_warmup(optimizer, int(num_train_optimization_steps * training_args.warmup_ratio), num_train_optimization_steps)
-    
     if training_args.do_train:
         model.train()
-        max_acc = 0.
         # TODO
         checkpoint = None
         if training_args.resume_from_checkpoint is not None:
@@ -508,23 +483,21 @@ def main():
         elif last_checkpoint is not None:
             checkpoint = last_checkpoint
         
-        for epoch in range(training_args.num_train_epochs):
+        # 不加int()转换会报错TypeError: 'float' object cannot be interpreted as an integer
+        for epoch in range(int(training_args.num_train_epochs)):
             total_loss = 0.
             total_correct = 0.
             total_num = 0.
             step = 0
             for batch in train_data_loader:
                 step += 1
-                
-                batch = [b.to(model._model_device) for b in batch]
+                optimizer.zero_grad()
                 
                 input = dict(zip(keys,batch))
                 loss, logits, labels = model(is_train=True, **input)
                 
                 loss.backward()
                 optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
                 
                 metrics = compute_metrics(logits, labels)
                 total_loss += loss
@@ -535,41 +508,15 @@ def main():
                 a = "*" * int(rate * 50)
                 b = "." * int((1 - rate) * 50)
                 print("\rtrain loss: {:^3.0f}%[{}->{}] loss: {:.4f}  accuracy: {:.4f}".format(int(rate*100), a, b, loss, metrics["accuracy"]*1.0/len(labels)), end="")
-
+                # logger.info("train loss: {:^3.0f}%[{}->{}] loss: {:.4f}  accuracy: {:.4f}".format(int(rate*100), a, b, loss, metrics["accuracy"]*1.0/len(labels)))
                 
-            logger.info("\nepoch: {:.0f} loss: {:.4f}  accuracy: {:.4f}".format(epoch+1, total_loss, total_correct/total_num))
-            
-            # eval
-            # model.eval()
-            # total_correct = 0.
-            # total_num = 0.
-            # for batch in tqdm(eval_data_loader):
-                
-            #     input = dict(zip(keys,batch))
-            #     loss, logits, labels = model(is_train=False, **input)
-                
-            #     metrics = compute_metrics(logits, labels)
-            #     total_correct += metrics["accuracy"]
-            #     total_num += len(labels)
-                
-            # logger.info("eval accuracy: {:.4f}".format(total_correct/total_num))
-            # if max_acc < total_correct/total_num:
-            #     save_trained_model(training_args.output_dir, model)
-            # model.train()
+            logger.info("epoch: {:.0f} loss: {:.4f}  accuracy: {:.4f}".format(epoch+1, total_loss, total_correct/total_num))
 
     # Evaluation
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
 
-        # model = BertForChID.from_pretrained(
-        #     training_args.output_dir,
-        #     from_tf=bool(".ckpt" in training_args.output_dir),
-        #     config=config,
-        #     cache_dir=model_args.cache_dir,
-        #     revision=model_args.model_revision,
-        #     use_auth_token=True if model_args.use_auth_token else None,
-        # ).to(_model_device)
-        # model.eval()
+        model.eval()
         total_correct = 0.
         total_num = 0.
         for batch in tqdm(test_data_loader):
@@ -596,16 +543,7 @@ def main():
     #     trainer.push_to_hub(**kwargs)
     # else:
     #     trainer.create_model_card(**kwargs)
-    
-def save_trained_model(output_dir, model):
-    if not os.path.exists(output_dir):
-        os.mkdir(output_dir)
-    logger.info('Saving model to %s'%output_dir)
-    model_to_save = model.module if hasattr(model, 'module') else model
-    output_model_file = os.path.join(output_dir, WEIGHTS_NAME)
-    output_config_file = os.path.join(output_dir, CONFIG_NAME)
-    torch.save(model_to_save.state_dict(), output_model_file)
-    model_to_save.config.to_json_file(output_config_file)
+
 
 def _mp_fn(index):
     # For xla_spawn (TPUs)
