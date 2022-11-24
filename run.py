@@ -23,7 +23,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from typing import Optional, Union
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "4"
 
 import datasets
 import numpy as np
