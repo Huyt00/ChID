@@ -277,6 +277,8 @@ class BertForChID(BertPreTrainedModel):
         # labels.shape:  torch.Size([1])
         score1 = torch.sum(F.log_softmax(candidate_logits, dim=-2), dim=-1) # (Batch_size, num_choices)
         loss1 = self.loss_func(score1, labels.to(self._model_device))
+        
+        return loss1, score1, labels
 
         ############### synonyms #################
         synonyms_indices = synonyms.transpose(-1, -2).reshape(-1, synonyms.shape[1]).contiguous().to(self._model_device)

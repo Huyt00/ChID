@@ -26,7 +26,7 @@ from typing import Optional, Union
 import random
 from tqdm import tqdm, trange
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "4"
 
 import datasets
 import numpy as np
