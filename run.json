@@ -7,7 +7,7 @@
     "test_file": "ChID_new/test_data.json",
     "metric_for_best_model": "eval_accuracy",
     "load_best_model_at_end": 1,
-    "learning_rate": 1e-4,
+    "learning_rate": 5e-5,
     "evaluation_strategy": "epoch",
     "num_train_epochs": 10,
     "output_dir": "./output_noMLP",

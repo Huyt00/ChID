@@ -26,7 +26,7 @@ from typing import Optional, Union
 import random
 from tqdm import tqdm, trange
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "4"
 
 import datasets
 import numpy as np
@@ -543,19 +543,20 @@ def main():
             # model.eval()
             total_correct = 0.
             total_num = 0.
-            for batch in eval_data_loader:
-                
-                input = dict(zip(keys,batch))
-                loss, logits, labels = model(is_train=False, **input)
-                
-                metrics = compute_metrics(logits, labels)
-                total_correct += metrics["accuracy"]
-                total_num += len(labels)
+            with torch.no_grad():
+                for batch in eval_data_loader:
+                    
+                    input = dict(zip(keys,batch))
+                    loss, logits, labels = model(is_train=False, **input)
+                    
+                    metrics = compute_metrics(logits, labels)
+                    total_correct += metrics["accuracy"]
+                    total_num += len(labels)
                 
             logger.info("eval accuracy: {:.4f}".format(total_correct/total_num))
             if max_acc < total_correct/total_num:
                 save_trained_model(training_args.output_dir, model)
-            model.train()
+            # model.train()
 
     # Evaluation
     if training_args.do_eval:
