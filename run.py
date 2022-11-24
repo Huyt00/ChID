@@ -23,11 +23,14 @@ import os
 import sys
 from dataclasses import dataclass, field
 from typing import Optional, Union
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+import random
+from tqdm import tqdm, trange
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import datasets
 import numpy as np
 import torch
+from torch.utils.data import TensorDataset,Dataset,DataLoader,random_split
 from datasets import load_dataset
 from model import BertForChID
 
@@ -119,7 +122,7 @@ class DataTrainingArguments:
         },
     )
     pad_to_max_length: bool = field(
-        default=False,
+        default=True,
         metadata={
             "help": (
                 "Whether to pad all samples to the maximum sentence length. "
@@ -190,8 +193,12 @@ class DataCollatorForChID:
     pad_to_multiple_of: Optional[int] = None
 
     def __call__(self, features):
-        label_name = "label" if "label" in features[0].keys() else "labels"
-        labels = [feature.pop(label_name) for feature in features]
+        try:
+            label_name = "label" if "label" in features[0].keys() else "labels"
+            labels = [feature.pop(label_name) for feature in features]
+        except:
+            label_name = "label" if "label" in features.keys() else "labels"
+            labels = features.pop(label_name)
 
         batch = self.tokenizer.pad(
             features,
@@ -207,7 +214,6 @@ class DataCollatorForChID:
         # Compute candidate masks
         batch["candidate_mask"] = batch["input_ids"] == self.tokenizer.mask_token_id
         return batch
-
 
 def main():
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
@@ -387,9 +393,35 @@ def main():
         tokenized_examples["labels"] = labels
         tokenized_candidates = [[tokenizer.convert_tokens_to_ids(list(candidate)) for candidate in candidates]for candidates in examples['candidates']]
         tokenized_examples["candidates"] = tokenized_candidates
+        
+        # Data collator
+        data_collator = DataCollatorForChID(tokenizer=tokenizer,  pad_to_multiple_of=8 if training_args.fp16 else None)
+    
+        data_set = data_collator(tokenized_examples.data).data
+        tokenized_examples['candidate_mask'] = data_set['candidate_mask'].tolist()
         return tokenized_examples
+    
+    def generate_dataset(dataset):
+        dataset = dataset.map(
+            preprocess_function_resize,
+            batched=True,
+            remove_columns=["groundTruth", "realCount"],
+            num_proc=data_args.preprocessing_num_workers,
+            load_from_cache_file=not data_args.overwrite_cache,
+        )
 
-
+        dataset = dataset.map(
+            preprocess_function_tokenize,
+            batched=True,
+            num_proc=data_args.preprocessing_num_workers,
+            load_from_cache_file=not data_args.overwrite_cache
+        )
+        data_set = {key:torch.tensor(dataset[:][key]) for key in tqdm(dataset[0].keys()) if key != 'content'}
+        dataset = TensorDataset(data_set['input_ids'], data_set['token_type_ids'], data_set['attention_mask'], data_set['candidates'], data_set['labels'], data_set['candidate_mask'])
+        data_loader = DataLoader(dataset, batch_size=training_args.per_device_train_batch_size, shuffle=True)
+        return data_loader
+    
+    keys = ['input_ids', 'token_type_ids', 'attention_mask', 'candidates', 'labels', 'candidate_mask']
     if training_args.do_train:
         if "train" not in raw_datasets:
             raise ValueError("--do_train requires a train dataset")
@@ -398,130 +430,100 @@ def main():
             max_train_samples = min(len(train_dataset), data_args.max_train_samples)
             train_dataset = train_dataset.select(range(max_train_samples))
         with training_args.main_process_first(desc="train dataset map pre-processing"):
-            train_dataset = train_dataset.map(
-                preprocess_function_resize,
-                batched=True,
-                remove_columns=["groundTruth", "realCount"],
-                num_proc=data_args.preprocessing_num_workers,
-                load_from_cache_file=not data_args.overwrite_cache,
-            )
-
-            train_dataset = train_dataset.map(
-                preprocess_function_tokenize,
-                batched=True,
-                num_proc=data_args.preprocessing_num_workers,
-                load_from_cache_file=not data_args.overwrite_cache,
-            )
-            # for index in range(3):
-            #     logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
+            train_data_loader = generate_dataset(train_dataset)
+            
     if training_args.do_eval:
-        if "validation" not in raw_datasets:
-            raise ValueError("--do_eval requires a validation dataset")
-        eval_dataset = raw_datasets["validation"]
-        if data_args.max_eval_samples is not None:
-            max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
-            eval_dataset = eval_dataset.select(range(max_eval_samples))
-        with training_args.main_process_first(desc="validation dataset map pre-processing"):
-            eval_dataset = eval_dataset.map(
-                preprocess_function_resize,
-                batched=True,
-                remove_columns=["groundTruth", "realCount"],
-                num_proc=data_args.preprocessing_num_workers,
-                load_from_cache_file=not data_args.overwrite_cache,
-            )
-            eval_dataset = eval_dataset.map(
-                preprocess_function_tokenize,
-                batched=True,
-                num_proc=data_args.preprocessing_num_workers,
-                load_from_cache_file=not data_args.overwrite_cache,
-            )
+        # if "validation" not in raw_datasets:
+        #     raise ValueError("--do_eval requires a validation dataset")
+        # eval_dataset = raw_datasets["validation"]
+        # if data_args.max_eval_samples is not None:
+        #     max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
+        #     eval_dataset = eval_dataset.select(range(max_eval_samples))
+        # with training_args.main_process_first(desc="validation dataset map pre-processing"):
+        #     eval_data_loader = generate_dataset(eval_dataset)
         test_dataset = raw_datasets["test"]
         with training_args.main_process_first(desc="test dataset map pre-processing"):
-            test_dataset = test_dataset.map(
-                preprocess_function_resize,
-                batched=True,
-                remove_columns=["groundTruth", "realCount"],
-                num_proc=data_args.preprocessing_num_workers,
-                load_from_cache_file=not data_args.overwrite_cache,
-            )
-            test_dataset = test_dataset.map(
-                preprocess_function_tokenize,
-                batched=True,
-                num_proc=data_args.preprocessing_num_workers,
-                load_from_cache_file=not data_args.overwrite_cache,
-            )
-    # Data collator
-    data_collator = (
-        default_data_collator
-        if data_args.pad_to_max_length
-        else DataCollatorForChID(tokenizer=tokenizer, pad_to_multiple_of=8 if training_args.fp16 else None)
-    )
-    # data_collator = default_data_collator
+            test_data_loader = generate_dataset(test_dataset)
+    
 
 
 
     # Metric
     def compute_metrics(eval_predictions):
         predictions, label_ids = eval_predictions
-        preds = np.argmax(predictions, axis=1)
-        return {"accuracy": (preds == label_ids).astype(np.float32).mean().item()}
+        preds = np.argmax(predictions.detach().cpu().numpy(), axis=1)
+        return {"accuracy": (preds == label_ids.cpu().numpy()).astype(np.float32).mean().item()}
 
-    # Initialize our Trainer
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset if training_args.do_train else None,
-        eval_dataset=eval_dataset if training_args.do_eval else None,
-        tokenizer=tokenizer,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics,
-    )
-
+    optimizer = torch.optim.Adam(params = model.parameters(),lr=training_args.learning_rate)
 
     # Training
     if training_args.do_train:
+        model.train()
+        max_acc = 0.
+        # TODO
         checkpoint = None
         if training_args.resume_from_checkpoint is not None:
             checkpoint = training_args.resume_from_checkpoint
         elif last_checkpoint is not None:
             checkpoint = last_checkpoint
-        train_result = trainer.train(resume_from_checkpoint=checkpoint)
-        trainer.save_model()  # Saves the tokenizer too for easy upload
-        metrics = train_result.metrics
+        
+        for epoch in range(training_args.num_train_epochs):
+            total_loss = 0.
+            total_correct = 0.
+            total_num = 0.
+            step = 0
+            for batch in train_data_loader:
+                step += 1
+                optimizer.zero_grad()
+                
+                batch = [b.to(model._model_device) for b in batch]
+                
+                input = dict(zip(keys,batch))
+                output = model(**input)
+                
+                output.loss.backward()
+                optimizer.step()
+                
+                metrics = compute_metrics((output.logits, batch[-2]))
+                total_loss += output.loss
+                total_correct += metrics["accuracy"]
+                # total_num += len(batch[-2])
+                total_num += 1
+                
+                rate = step / len(train_data_loader)
+                a = "*" * int(rate * 50)
+                b = "." * int((1 - rate) * 50)
+                print("\rtrain loss: {:^3.0f}%[{}->{}] loss: {:.4f}  accuracy: {:.4f}".format(int(rate*100), a, b, output.loss, metrics["accuracy"]*1.0), end="")
 
-        max_train_samples = (
-            data_args.max_train_samples if data_args.max_train_samples is not None else len(train_dataset)
-        )
-        metrics["train_samples"] = min(max_train_samples, len(train_dataset))
-
-        trainer.log_metrics("train", metrics)
-        trainer.save_metrics("train", metrics)
-        trainer.save_state()
+                
+            logger.info("\nepoch: {:.0f} loss: {:.4f}  accuracy: {:.4f}".format(epoch+1, total_loss, total_correct/total_num))
 
     # Evaluation
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
 
-        metrics = trainer.evaluate(eval_dataset=test_dataset)
-        metrics["test_samples"] = len(test_dataset)
+        total_loss = 0.
+        total_correct = 0.
+        total_num = 0.
+        step = 0
+        
+        model.eval()
+        # with torch.no_grad():
+        for batch in tqdm(test_data_loader):
+            
+            batch = [b.to(model._model_device) for b in batch]
+            
+            input = dict(zip(keys,batch))
+            output = model(**input)
+            
+            metrics = compute_metrics((output.logits, batch[-2]))
+            total_loss += output.loss
+            total_correct += metrics["accuracy"]
+            total_num += 1
+                
+        logger.info("\nepoch: {:.0f} loss: {:.4f}  accuracy: {:.4f}".format(epoch+1, total_loss, total_correct/total_num))
 
-        trainer.log_metrics("test", metrics)
-        trainer.save_metrics("test", metrics)
-
-    # kwargs = dict(
-    #     finetuned_from=model_args.model_name_or_path,
-    #     tasks="multiple-choice",
-    #     dataset_tags="swag",
-    #     dataset_args="regular",
-    #     dataset="SWAG",
-    #     language="en",
-    # )
-
-    # if training_args.push_to_hub:
-    #     trainer.push_to_hub(**kwargs)
-    # else:
-    #     trainer.create_model_card(**kwargs)
-
+    
 
 def _mp_fn(index):
     # For xla_spawn (TPUs)
