@@ -26,7 +26,8 @@ class BertForChID(BertPreTrainedModel):
 
         self.bert = BertModel(config, add_pooling_layer=False)
         self.cls = BertOnlyMLMHead(config)
-
+        self._model_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
         # Initialize weights and apply final processing
         self.post_init()
 
