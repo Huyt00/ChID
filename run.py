@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Union
 import random
 from tqdm import tqdm, trange
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 import datasets
 import numpy as np
@@ -106,6 +106,9 @@ class DataTrainingArguments:
         metadata={"help": "An optional input test data file (a text file)."},
     )
     overwrite_cache: bool = field(
+        default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
+    )
+    use_synonyms: bool = field(
         default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
     )
     preprocessing_num_workers: Optional[int] = field(
@@ -225,7 +228,7 @@ def main():
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]), allow_extra_keys=True)
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
@@ -354,7 +357,7 @@ def main():
     # The idiom tag of each instance will be replaced with 4 [MASK] tokens.
     def preprocess_function_resize(examples):
         return_dic = {}
-        return_dic_keys = ['candidates', 'content', 'labels']
+        return_dic_keys = ['candidates', 'synonyms', 'synonyms_len', 'content', 'labels', 'labels_syn']
         for k in return_dic_keys:
             return_dic[k] = []
 
@@ -362,19 +365,36 @@ def main():
             idx = -1
             text = examples['content'][i]
             for j in range(examples['realCount'][i]):
-                return_dic['candidates'].append(examples['candidates'][i][j])
                 idx = text.find(idiom_tag, idx+1)
                 return_dic['content'].append(text[:idx] + tokenizer.mask_token*4 + text[idx+len(idiom_tag):])
+                
+                # candidates
+                return_dic['candidates'].append(examples['candidates'][i][j])
                 for k, candidate in enumerate(examples['candidates'][i][j]):
                     if candidate == examples['groundTruth'][i][j]:
                         return_dic['labels'].append(k)
+                        break
+                    
+                # synonyms
+                examples['synonyms'][i][j] = [examples['groundTruth'][i][j]] + examples['synonyms'][i][j]
+                examples['synonyms'][i][j] = [exa for exa in examples['synonyms'][i][j] if len(exa)==4][:7]
+                random.shuffle(examples['synonyms'][i][j])
+                syn_len = len(examples['synonyms'][i][j])
+                examples['synonyms'][i][j] = (examples['synonyms'][i][j] + ["M"*4]*7)[:7]
+                
+                return_dic['synonyms'].append(examples['synonyms'][i][j])
+                return_dic['synonyms_len'].append(syn_len)
+                for k, candidate in enumerate(examples['synonyms'][i][j]):
+                    if candidate == examples['groundTruth'][i][j]:
+                        return_dic['labels_syn'].append(k)
                         break
         return return_dic
 
     # tokenize all instances
     def preprocess_function_tokenize(examples):
         first_sentences = examples['content']
-        labels = examples[label_column_name]
+        labels = examples["labels"]
+        labels_syn = examples["labels_syn"]
         # truncate the first sentences.
         for i, sentence in enumerate(first_sentences):
             if len(sentence) <= 500:
@@ -390,9 +410,15 @@ def main():
             padding="max_length" if data_args.pad_to_max_length else False,
             truncation=True,
         )
+        # candidates
         tokenized_examples["labels"] = labels
         tokenized_candidates = [[tokenizer.convert_tokens_to_ids(list(candidate)) for candidate in candidates]for candidates in examples['candidates']]
         tokenized_examples["candidates"] = tokenized_candidates
+        
+        # synonyms
+        tokenized_examples["labels_syn"] = labels_syn
+        tokenized_synonyms = [[tokenizer.convert_tokens_to_ids(list(synonym)) for synonym in synonyms]for synonyms in examples['synonyms']]
+        tokenized_examples["synonyms"] = tokenized_synonyms
         
         # Data collator
         data_collator = DataCollatorForChID(tokenizer=tokenizer,  pad_to_multiple_of=8 if training_args.fp16 else None)
@@ -405,7 +431,7 @@ def main():
         dataset = dataset.map(
             preprocess_function_resize,
             batched=True,
-            remove_columns=["groundTruth", "realCount"],
+            remove_columns=["groundTruth", "realCount", "explaination", "exp embedding"],
             num_proc=data_args.preprocessing_num_workers,
             load_from_cache_file=not data_args.overwrite_cache,
         )
@@ -417,11 +443,11 @@ def main():
             load_from_cache_file=not data_args.overwrite_cache
         )
         data_set = {key:torch.tensor(dataset[:][key]) for key in tqdm(dataset[0].keys()) if key != 'content'}
-        dataset = TensorDataset(data_set['input_ids'], data_set['token_type_ids'], data_set['attention_mask'], data_set['candidates'], data_set['labels'], data_set['candidate_mask'])
+        dataset = TensorDataset(data_set['input_ids'], data_set['token_type_ids'], data_set['attention_mask'], data_set['candidates'], data_set['synonyms'], data_set['synonyms_len'], data_set['labels'], data_set['labels_syn'], data_set['candidate_mask'])
         data_loader = DataLoader(dataset, batch_size=training_args.per_device_train_batch_size, shuffle=True)
         return data_loader
     
-    keys = ['input_ids', 'token_type_ids', 'attention_mask', 'candidates', 'labels', 'candidate_mask']
+    keys = ['input_ids', 'token_type_ids', 'attention_mask', 'candidates', 'synonyms', 'synonyms_len', 'labels', 'labels_syn', 'candidate_mask']
     if training_args.do_train:
         if "train" not in raw_datasets:
             raise ValueError("--do_train requires a train dataset")
@@ -480,12 +506,16 @@ def main():
                 batch = [b.to(model._model_device) for b in batch]
                 
                 input = dict(zip(keys,batch))
-                output = model(**input)
+                output = model(**input, use_synonyms = data_args.use_synonyms)
                 
                 output.loss.backward()
                 optimizer.step()
                 
-                metrics = compute_metrics((output.logits, batch[-2]))
+                if data_args.use_synonyms:
+                    labels = torch.cat((input['labels'], input['labels_syn']), dim=0)
+                else:
+                    labels = input['labels']
+                metrics = compute_metrics((output.logits, labels))
                 total_loss += output.loss
                 total_correct += metrics["accuracy"]
                 # total_num += len(batch[-2])
@@ -499,27 +529,27 @@ def main():
                 
             logger.info("\nepoch: {:.0f} loss: {:.4f}  accuracy: {:.4f}".format(epoch+1, total_loss, total_correct/total_num))
 
-        total_loss = 0.
-        total_correct = 0.
-        total_num = 0.
-        step = 0
-        
-        model.eval()
-        with torch.no_grad():
-            for batch in eval_data_loader:
-                
-                batch = [b.to(model._model_device) for b in batch]
-                
-                input = dict(zip(keys,batch))
-                output = model(**input)
-                
-                metrics = compute_metrics((output.logits, batch[-2]))
-                total_loss += output.loss
-                total_correct += metrics["accuracy"]
-                total_num += 1
-                
-        logger.info("\nepoch: {:.0f} loss: {:.4f}  accuracy: {:.4f}".format(epoch+1, total_loss, total_correct/total_num))
-        model.train()
+            # total_loss = 0.
+            # total_correct = 0.
+            # total_num = 0.
+            # step = 0
+            
+            model.eval()
+            with torch.no_grad():
+                for batch in eval_data_loader:
+                    
+                    batch = [b.to(model._model_device) for b in batch]
+                    
+                    input = dict(zip(keys,batch))
+                    output = model(**input)
+                    
+                    metrics = compute_metrics((output.logits, batch[-2]))
+                    total_loss += output.loss
+                    total_correct += metrics["accuracy"]
+                    total_num += 1
+                    
+            logger.info("\neval loss: {:.4f}  accuracy: {:.4f}".format(total_loss, total_correct/total_num))
+            model.train()
         
         
     # Evaluation

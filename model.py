@@ -27,6 +27,7 @@ class BertForChID(BertPreTrainedModel):
         self.bert = BertModel(config, add_pooling_layer=False)
         self.cls = BertOnlyMLMHead(config)
         self._model_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.syn_loss_rate = 0.1
         
         # Initialize weights and apply final processing
         self.post_init()
@@ -57,11 +58,15 @@ class BertForChID(BertPreTrainedModel):
         encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
+        labels_syn: Optional[torch.Tensor] = None,
         candidates: Optional[torch.Tensor] = None,
+        synonyms: Optional[torch.Tensor] = None,
+        synonyms_len: Optional[torch.Tensor] = None,
         candidate_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        use_synonyms = False
     ) -> Union[Tuple[torch.Tensor], MaskedLMOutput]:
         r"""
         labels: torch.LongTensor of shape `(batch_size, )`
@@ -91,22 +96,35 @@ class BertForChID(BertPreTrainedModel):
         masked_lm_loss = None
         if labels is not None:
             loss_fct = CrossEntropyLoss() 
-            candidate_prediction_scores = torch.masked_select(prediction_scores, candidate_mask.unsqueeze(-1)).reshape(-1, prediction_scores.shape[-1], 1) # (Batch_size x 4, Vocab_size, 1)
+            mask_prediction_scores = torch.masked_select(prediction_scores, candidate_mask.unsqueeze(-1)).reshape(-1, prediction_scores.shape[-1], 1) # (Batch_size x 4, Vocab_size, 1)
+            
+            # candidate
             candidate_indices = candidates.transpose(-1, -2).reshape(-1, candidates.shape[1]) # (Batch_size x 4, num_choices)
-            candidate_logits = batched_index_select(candidate_prediction_scores, candidate_indices).squeeze(-1).reshape(prediction_scores.shape[0], 4, -1).transpose(-1, -2) # (Batch_size, num_choices, 4)
+            candidate_logits = batched_index_select(mask_prediction_scores, candidate_indices).squeeze(-1).reshape(prediction_scores.shape[0], 4, -1).transpose(-1, -2) # (Batch_size, num_choices, 4)
 
             candidate_labels = labels.reshape(labels.shape[0], 1).repeat(1, 4) # (Batch_size, 4)
-            candidate_final_scores = torch.sum(F.log_softmax(candidate_logits, dim=-2), dim=-1) # (Batch_size, num_choices)
-
+            final_scores = torch.sum(F.log_softmax(candidate_logits, dim=-2), dim=-1) # (Batch_size, num_choices)
             masked_lm_loss = loss_fct(candidate_logits, candidate_labels)
+            
+            # synonyms
+            if use_synonyms:
+                synonyms_indices = synonyms.transpose(-1, -2).reshape(-1, synonyms.shape[1]) # (Batch_size x 4, num_choices)
+                synonyms_logits = batched_index_select(mask_prediction_scores, synonyms_indices).squeeze(-1).reshape(prediction_scores.shape[0], 4, -1).transpose(-1, -2) # (Batch_size, num_choices, 4)
+
+                synonyms_labels = labels_syn.reshape(labels_syn.shape[0], 1).repeat(1, 4) # (Batch_size, 4)
+                synonyms_final_scores = torch.sum(F.log_softmax(synonyms_logits, dim=-2), dim=-1) # (Batch_size, num_choices)
+                masked_lm_loss += self.syn_loss_rate*loss_fct(synonyms_logits, synonyms_labels)
+                final_scores = torch.cat((final_scores, synonyms_final_scores), dim=0)
+
 
         if not return_dict:
             output = (prediction_scores,) + outputs[2:]
             return ((masked_lm_loss,) + output) if masked_lm_loss is not None else output
 
+        
         return MaskedLMOutput(
             loss=masked_lm_loss,
-            logits=candidate_final_scores,
+            logits=final_scores,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
