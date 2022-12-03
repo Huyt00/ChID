@@ -44,6 +44,7 @@ from transformers import (
     TrainingArguments,
     default_data_collator,
     set_seed,
+    BertModel,
 )
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.trainer_utils import get_last_checkpoint
@@ -334,7 +335,9 @@ def main():
     #     revision=model_args.model_revision,
     #     use_auth_token=True if model_args.use_auth_token else None,
     # )
-    model = make_model(VOCAB_SIZE, VOCAB_SIZE, N=6)
+    _model_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    bert_encoder = BertModel(config, add_pooling_layer=False).to(_model_device)
+    model = make_model(bert_encoder, VOCAB_SIZE, VOCAB_SIZE, N=2)
 
     label_column_name = "labels"
     idiom_tag = '#idiom#'
@@ -508,10 +511,6 @@ def main():
         
         
         for epoch in range(training_args.num_train_epochs):
-            # total_loss = 0.
-            # total_correct = 0.
-            # total_num = 0.
-            # step = 0
             model.train()
             run_epoch(train_data_loader, 
                     model, 
@@ -520,85 +519,38 @@ def main():
                     lr_scheduler,
                     mode="train",
                     )
-            
-            # for batch in train_data_loader:
-            #     step += 1
-            #     optimizer.zero_grad()
-                
-            #     batch = [b.to(model._model_device) for b in batch]
-                
-            #     input = dict(zip(keys,batch))
-            #     output = model(**input, use_synonyms = data_args.use_synonyms)
-                
-            #     output.loss.backward()
-            #     optimizer.step()
-                
-            #     if data_args.use_synonyms:
-            #         labels = torch.cat((input['labels'], input['labels_syn']), dim=0)
-            #     else:
-            #         labels = input['labels']
-            #     metrics = compute_metrics((output.logits, labels))
-            #     total_loss += output.loss
-            #     total_correct += metrics["accuracy"]
-            #     # total_num += len(batch[-2])
-            #     total_num += 1
-                
-                # rate = step / len(train_data_loader)
-                # a = "*" * int(rate * 50)
-                # b = "." * int((1 - rate) * 50)
-                # print("\rtrain loss: {:^3.0f}%[{}->{}] loss: {:.4f}  accuracy: {:.4f}".format(int(rate*100), a, b, output.loss, metrics["accuracy"]*1.0), end="")
+            torch.cuda.empty_cache()
 
-                
-            # logger.info("\nepoch: {:.0f} loss: {:.4f}  accuracy: {:.4f}".format(epoch+1, total_loss, total_correct/total_num))
-
-            # total_loss = 0.
-            # total_correct = 0.
-            # total_num = 0.
-            # step = 0
+            print(f"Epoch {epoch} Validation ====", flush=True)
+            model.eval()
+            with torch.no_grad():
+                sloss, acc = run_epoch(
+                    eval_data_loader,
+                    model,
+                    SimpleLossCompute(model.generator, criterion),
+                    DummyOptimizer(),
+                    DummyScheduler(),
+                    mode="eval",
+                )
+                print(("loss: %3d, acc: %3d") % (sloss.item(), acc))
+            torch.cuda.empty_cache()
             
-            # model.eval()
-            # with torch.no_grad():
-            #     for batch in eval_data_loader:
-                    
-            #         batch = [b.to(model._model_device) for b in batch]
-                    
-            #         input = dict(zip(keys,batch))
-            #         output = model(**input)
-                    
-            #         metrics = compute_metrics((output.logits, batch[-2]))
-            #         total_loss += output.loss
-            #         total_correct += metrics["accuracy"]
-            #         total_num += 1
-                    
-            # logger.info("\neval loss: {:.4f}  accuracy: {:.4f}".format(total_loss, total_correct/total_num))
-            # model.train()
         
         
     # Evaluation
     if training_args.do_eval:
-        logger.info("*** Evaluate ***")
+        logger.info("*** TEST ***")
 
-        total_loss = 0.
-        total_correct = 0.
-        total_num = 0.
-        step = 0
-        
         model.eval()
-        with torch.no_grad():
-            for batch in test_data_loader:
-                
-                batch = [b.to(model._model_device) for b in batch]
-                
-                input = dict(zip(keys,batch))
-                output = model(**input)
-                
-                metrics = compute_metrics((output.logits, batch[-2]))
-                total_loss += output.loss
-                total_correct += metrics["accuracy"]
-                total_num += 1
-                
-        logger.info("\ntest loss: {:.4f}  accuracy: {:.4f}".format(total_loss, total_correct/total_num))
-
+        sloss = run_epoch(
+            test_data_loader,
+            model,
+            SimpleLossCompute(model.generator, criterion),
+            DummyOptimizer(),
+            DummyScheduler(),
+            mode="eval",
+        )
+        print(sloss)
     
 
 def _mp_fn(index):
