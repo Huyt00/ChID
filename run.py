@@ -20,34 +20,26 @@ Fine-tuning the library models for ChID.
 
 import logging
 import os
+import random
 import sys
 from dataclasses import dataclass, field
 from typing import Optional, Union
-import random
+
 from tqdm import tqdm, trange
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import datasets
 import numpy as np
 import torch
-from torch.utils.data import TensorDataset,Dataset,DataLoader,random_split
+import transformers
 from datasets import load_dataset
 from model import BertForChID
-
-import transformers
-from transformers import (
-    AutoConfig,
-    AutoTokenizer,
-    HfArgumentParser,
-    Trainer,
-    TrainingArguments,
-    default_data_collator,
-    set_seed,
-)
+from torch.utils.data import DataLoader, Dataset, TensorDataset, random_split
+from transformers import (AutoConfig, AutoTokenizer, HfArgumentParser, Trainer,
+                          TrainingArguments, default_data_collator, set_seed)
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.trainer_utils import get_last_checkpoint
-
-
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +220,7 @@ def main():
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]), allow_extra_keys=True)
+        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1])) #,allow_extra_keys=True
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
@@ -357,7 +349,7 @@ def main():
     # The idiom tag of each instance will be replaced with 4 [MASK] tokens.
     def preprocess_function_resize(examples):
         return_dic = {}
-        return_dic_keys = ['candidates', 'synonyms', 'synonyms_len', 'content', 'labels', 'labels_syn']
+        return_dic_keys = ['candidates', 'synonyms', 'synonyms_len', 'content', 'labels', 'labels_syn','synonyms_mask']
         for k in return_dic_keys:
             return_dic[k] = []
 
@@ -380,10 +372,13 @@ def main():
                 examples['synonyms'][i][j] = [exa for exa in examples['synonyms'][i][j] if len(exa)==4][:7]
                 random.shuffle(examples['synonyms'][i][j])
                 syn_len = len(examples['synonyms'][i][j])
+                return_dic['synonyms_mask'].append(torch.tensor([1]*syn_len+[0]*(7-syn_len)))
                 examples['synonyms'][i][j] = (examples['synonyms'][i][j] + ["M"*4]*7)[:7]
                 
                 return_dic['synonyms'].append(examples['synonyms'][i][j])
                 return_dic['synonyms_len'].append(syn_len)
+    
+                #print(return_dic['synonyms_mask'])
                 for k, candidate in enumerate(examples['synonyms'][i][j]):
                     if candidate == examples['groundTruth'][i][j]:
                         return_dic['labels_syn'].append(k)
@@ -419,8 +414,9 @@ def main():
         tokenized_examples["labels_syn"] = labels_syn
         tokenized_synonyms = [[tokenizer.convert_tokens_to_ids(list(synonym)) for synonym in synonyms]for synonyms in examples['synonyms']]
         tokenized_examples["synonyms"] = tokenized_synonyms
-        
+        tokenized_examples["position"] = [l.index(tokenizer.mask_token_id) for l in tokenized_examples["input_ids"]]
         # Data collator
+        #print(tokenized_examples["position"])
         data_collator = DataCollatorForChID(tokenizer=tokenizer,  pad_to_multiple_of=8 if training_args.fp16 else None)
     
         data_set = data_collator(tokenized_examples.data).data
@@ -442,12 +438,13 @@ def main():
             num_proc=data_args.preprocessing_num_workers,
             load_from_cache_file=not data_args.overwrite_cache
         )
+        #print(dataset[0].keys())
         data_set = {key:torch.tensor(dataset[:][key]) for key in tqdm(dataset[0].keys()) if key != 'content'}
-        dataset = TensorDataset(data_set['input_ids'], data_set['token_type_ids'], data_set['attention_mask'], data_set['candidates'], data_set['synonyms'], data_set['synonyms_len'], data_set['labels'], data_set['labels_syn'], data_set['candidate_mask'])
+        dataset = TensorDataset(data_set['input_ids'], data_set['token_type_ids'], data_set['attention_mask'], data_set['candidates'], data_set['synonyms'], data_set['synonyms_len'], data_set['labels'], data_set['labels_syn'], data_set['candidate_mask'], data_set['synonyms_mask'],data_set['position'])
         data_loader = DataLoader(dataset, batch_size=training_args.per_device_train_batch_size, shuffle=True)
         return data_loader
     
-    keys = ['input_ids', 'token_type_ids', 'attention_mask', 'candidates', 'synonyms', 'synonyms_len', 'labels', 'labels_syn', 'candidate_mask']
+    keys = ['input_ids', 'token_type_ids', 'attention_mask', 'candidates', 'synonyms', 'synonyms_len', 'labels', 'labels_syn', 'candidate_mask','synonyms_mask','position']
     if training_args.do_train:
         if "train" not in raw_datasets:
             raise ValueError("--do_train requires a train dataset")
@@ -478,6 +475,9 @@ def main():
     def compute_metrics(eval_predictions):
         predictions, label_ids = eval_predictions
         preds = np.argmax(predictions.detach().cpu().numpy(), axis=1)
+        #print(preds.shape)
+        #print("label_id")
+        #print(label_ids.shape)
         return {"accuracy": (preds == label_ids.cpu().numpy()).astype(np.float32).mean().item()}
 
     model.to(model._model_device)
@@ -506,17 +506,28 @@ def main():
                 batch = [b.to(model._model_device) for b in batch]
                 
                 input = dict(zip(keys,batch))
+                '''
                 output = model(**input, use_synonyms = data_args.use_synonyms)
-                
                 output.loss.backward()
+                '''
+                loss, logits, labels = model(is_train=True, use_synonyms = data_args.use_synonyms, **input)  
+                loss.backward()
+                
                 optimizer.step()
                 
-                if data_args.use_synonyms:
-                    labels = torch.cat((input['labels'], input['labels_syn']), dim=0)
-                else:
-                    labels = input['labels']
-                metrics = compute_metrics((output.logits, labels))
-                total_loss += output.loss
+                # if data_args.use_synonyms:
+                #     labels = torch.cat((input['labels'], input['labels_syn']), dim=0)
+                # else:
+                #     labels = input['labels']
+                '''    
+                print(logits.shape)
+                print("labels")
+                print(labels.shape)
+                '''
+                
+                metrics = compute_metrics((logits, labels))
+
+                total_loss += loss
                 total_correct += metrics["accuracy"]
                 # total_num += len(batch[-2])
                 total_num += 1
@@ -541,10 +552,18 @@ def main():
                     batch = [b.to(model._model_device) for b in batch]
                     
                     input = dict(zip(keys,batch))
-                    output = model(**input)
+                    #output = model(**input)
+                    loss, logits, labels = model(is_train=False, use_synonyms = data_args.use_synonyms, **input)
                     
-                    metrics = compute_metrics((output.logits, batch[-2]))
-                    total_loss += output.loss
+                    if data_args.use_synonyms:
+                        labels = torch.cat((input['labels'], input['labels_syn']), dim=0)
+                    else:
+                        labels = input['labels']
+                    #print("batch")
+                    #print(batch)
+                    #metrics = compute_metrics((logits, batch[-2]))
+                    metrics = compute_metrics((logits, labels))
+                    total_loss += loss
                     total_correct += metrics["accuracy"]
                     total_num += 1
                     
@@ -568,10 +587,11 @@ def main():
                 batch = [b.to(model._model_device) for b in batch]
                 
                 input = dict(zip(keys,batch))
-                output = model(**input)
-                
-                metrics = compute_metrics((output.logits, batch[-2]))
-                total_loss += output.loss
+                loss, logits, labels = model(is_train=False, use_synonyms = data_args.use_synonyms, **input)
+                #output = model(**input)
+                #metrics = compute_metrics((logits, batch[-2]))
+                metrics = compute_metrics((logits, labels))
+                total_loss += loss
                 total_correct += metrics["accuracy"]
                 total_num += 1
                 
