@@ -30,6 +30,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 import datasets
 import numpy as np
 import torch
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import TensorDataset,Dataset,DataLoader,random_split
 from datasets import load_dataset
 from model import BertForChID
@@ -46,10 +47,12 @@ from transformers import (
 )
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.trainer_utils import get_last_checkpoint
+from decoder_my import *
 
 
 
 logger = logging.getLogger(__name__)
+VOCAB_SIZE = 21128
 
 
 @dataclass
@@ -323,14 +326,15 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
-    model = BertForChID.from_pretrained(
-        model_args.model_name_or_path,
-        from_tf=bool(".ckpt" in model_args.model_name_or_path),
-        config=config,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
-    )
+    # model = BertForChID.from_pretrained(
+    #     model_args.model_name_or_path,
+    #     from_tf=bool(".ckpt" in model_args.model_name_or_path),
+    #     config=config,
+    #     cache_dir=model_args.cache_dir,
+    #     revision=model_args.model_revision,
+    #     use_auth_token=True if model_args.use_auth_token else None,
+    # )
+    model = make_model(VOCAB_SIZE, VOCAB_SIZE, N=6)
 
     label_column_name = "labels"
     idiom_tag = '#idiom#'
@@ -482,6 +486,13 @@ def main():
 
     model.to(model._model_device)
     optimizer = torch.optim.Adam(params = model.parameters(),lr=training_args.learning_rate)
+    lr_scheduler = LambdaLR(
+        optimizer=optimizer,
+        lr_lambda=lambda step: rate(
+            step, model_size=model.src_embed[0].d_model, factor=1.0, warmup=400
+        ),
+    )
+    criterion = LabelSmoothing(size=VOCAB_SIZE, padding_idx=0, smoothing=0.0)
 
     # Training
     if training_args.do_train:
@@ -493,6 +504,14 @@ def main():
             checkpoint = training_args.resume_from_checkpoint
         elif last_checkpoint is not None:
             checkpoint = last_checkpoint
+        
+        run_epoch(train_data_loader, 
+                  model, 
+                  SimpleLossCompute(model.generator, criterion),
+                  optimizer,
+                  lr_scheduler,
+                  mode="train",
+                  )
         
         for epoch in range(training_args.num_train_epochs):
             total_loss = 0.
