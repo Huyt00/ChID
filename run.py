@@ -486,13 +486,14 @@ def main():
 
     model.to(model._model_device)
     optimizer = torch.optim.Adam(params = model.parameters(),lr=training_args.learning_rate)
-    lr_scheduler = LambdaLR(
-        optimizer=optimizer,
-        lr_lambda=lambda step: rate(
-            step, model_size=model.src_embed[0].d_model, factor=1.0, warmup=400
-        ),
-    )
-    criterion = LabelSmoothing(size=VOCAB_SIZE, padding_idx=0, smoothing=0.0)
+    # lr_scheduler = LambdaLR(
+    #     optimizer=optimizer,
+    #     lr_lambda=lambda step: rate(
+    #         step, model_size=model.src_embed[0].d_model, factor=1.0, warmup=400
+    #     ),
+    # )
+    lr_scheduler = None
+    criterion = LabelSmoothing(size=7, padding_idx=0, smoothing=0.0)
 
     # Training
     if training_args.do_train:
@@ -505,40 +506,42 @@ def main():
         elif last_checkpoint is not None:
             checkpoint = last_checkpoint
         
-        run_epoch(train_data_loader, 
-                  model, 
-                  SimpleLossCompute(model.generator, criterion),
-                  optimizer,
-                  lr_scheduler,
-                  mode="train",
-                  )
         
         for epoch in range(training_args.num_train_epochs):
-            total_loss = 0.
-            total_correct = 0.
-            total_num = 0.
-            step = 0
-            for batch in train_data_loader:
-                step += 1
-                optimizer.zero_grad()
+            # total_loss = 0.
+            # total_correct = 0.
+            # total_num = 0.
+            # step = 0
+            model.train()
+            run_epoch(train_data_loader, 
+                    model, 
+                    SimpleLossCompute(model.generator, criterion),
+                    optimizer,
+                    lr_scheduler,
+                    mode="train",
+                    )
+            
+            # for batch in train_data_loader:
+            #     step += 1
+            #     optimizer.zero_grad()
                 
-                batch = [b.to(model._model_device) for b in batch]
+            #     batch = [b.to(model._model_device) for b in batch]
                 
-                input = dict(zip(keys,batch))
-                output = model(**input, use_synonyms = data_args.use_synonyms)
+            #     input = dict(zip(keys,batch))
+            #     output = model(**input, use_synonyms = data_args.use_synonyms)
                 
-                output.loss.backward()
-                optimizer.step()
+            #     output.loss.backward()
+            #     optimizer.step()
                 
-                if data_args.use_synonyms:
-                    labels = torch.cat((input['labels'], input['labels_syn']), dim=0)
-                else:
-                    labels = input['labels']
-                metrics = compute_metrics((output.logits, labels))
-                total_loss += output.loss
-                total_correct += metrics["accuracy"]
-                # total_num += len(batch[-2])
-                total_num += 1
+            #     if data_args.use_synonyms:
+            #         labels = torch.cat((input['labels'], input['labels_syn']), dim=0)
+            #     else:
+            #         labels = input['labels']
+            #     metrics = compute_metrics((output.logits, labels))
+            #     total_loss += output.loss
+            #     total_correct += metrics["accuracy"]
+            #     # total_num += len(batch[-2])
+            #     total_num += 1
                 
                 # rate = step / len(train_data_loader)
                 # a = "*" * int(rate * 50)
@@ -546,29 +549,29 @@ def main():
                 # print("\rtrain loss: {:^3.0f}%[{}->{}] loss: {:.4f}  accuracy: {:.4f}".format(int(rate*100), a, b, output.loss, metrics["accuracy"]*1.0), end="")
 
                 
-            logger.info("\nepoch: {:.0f} loss: {:.4f}  accuracy: {:.4f}".format(epoch+1, total_loss, total_correct/total_num))
+            # logger.info("\nepoch: {:.0f} loss: {:.4f}  accuracy: {:.4f}".format(epoch+1, total_loss, total_correct/total_num))
 
             # total_loss = 0.
             # total_correct = 0.
             # total_num = 0.
             # step = 0
             
-            model.eval()
-            with torch.no_grad():
-                for batch in eval_data_loader:
+            # model.eval()
+            # with torch.no_grad():
+            #     for batch in eval_data_loader:
                     
-                    batch = [b.to(model._model_device) for b in batch]
+            #         batch = [b.to(model._model_device) for b in batch]
                     
-                    input = dict(zip(keys,batch))
-                    output = model(**input)
+            #         input = dict(zip(keys,batch))
+            #         output = model(**input)
                     
-                    metrics = compute_metrics((output.logits, batch[-2]))
-                    total_loss += output.loss
-                    total_correct += metrics["accuracy"]
-                    total_num += 1
+            #         metrics = compute_metrics((output.logits, batch[-2]))
+            #         total_loss += output.loss
+            #         total_correct += metrics["accuracy"]
+            #         total_num += 1
                     
-            logger.info("\neval loss: {:.4f}  accuracy: {:.4f}".format(total_loss, total_correct/total_num))
-            model.train()
+            # logger.info("\neval loss: {:.4f}  accuracy: {:.4f}".format(total_loss, total_correct/total_num))
+            # model.train()
         
         
     # Evaluation
