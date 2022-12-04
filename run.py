@@ -48,7 +48,7 @@ from transformers import (
 )
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.trainer_utils import get_last_checkpoint
-from decoder_my import *
+from util import *
 
 
 
@@ -481,12 +481,7 @@ def main():
 
 
 
-    # Metric
-    def compute_metrics(eval_predictions):
-        predictions, label_ids = eval_predictions
-        preds = np.argmax(predictions.detach().cpu().numpy(), axis=1)
-        return {"accuracy": (preds == label_ids.cpu().numpy()).astype(np.float32).mean().item()}
-
+    
     model.to(model._model_device)
     optimizer = torch.optim.Adam(params = model.parameters(),lr=training_args.learning_rate)
     # lr_scheduler = LambdaLR(
