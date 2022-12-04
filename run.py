@@ -335,9 +335,9 @@ def main():
     #     revision=model_args.model_revision,
     #     use_auth_token=True if model_args.use_auth_token else None,
     # )
-    _model_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    bert_encoder = BertModel(config, add_pooling_layer=False).to(_model_device)
-    model = make_model(bert_encoder, VOCAB_SIZE, VOCAB_SIZE, N=2)
+    # _model_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # bert_encoder = BertModel(config, add_pooling_layer=False).to(_model_device)
+    model = make_model(config, VOCAB_SIZE, VOCAB_SIZE, N=2)
 
     label_column_name = "labels"
     idiom_tag = '#idiom#'
@@ -532,7 +532,7 @@ def main():
                     DummyScheduler(),
                     mode="eval",
                 )
-                print(("loss: %3d, acc: %3d") % (sloss.item(), acc))
+                print(("loss: %6.2f, acc: %6.2f") % (sloss.item(), acc))
             torch.cuda.empty_cache()
             
         
