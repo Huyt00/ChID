@@ -19,5 +19,6 @@
     "save_strategy": "epoch",
     "overwrite_output_dir": 1,
     "overwrite_cache": 1,
+    "reload_dataset": 1,
     "use_synonyms": 0
 }

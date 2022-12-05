@@ -22,31 +22,23 @@ import logging
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import Optional, Union
+from typing import Optional
 import random
 from tqdm import tqdm, trange
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 import datasets
-import numpy as np
 import torch
 from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data import TensorDataset,Dataset,DataLoader,random_split
-from datasets import load_dataset
-from model import BertForChID
 
 import transformers
 from transformers import (
     AutoConfig,
     AutoTokenizer,
     HfArgumentParser,
-    Trainer,
     TrainingArguments,
-    default_data_collator,
     set_seed,
-    BertModel,
 )
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.trainer_utils import get_last_checkpoint
 from util import *
 
@@ -115,6 +107,9 @@ class DataTrainingArguments:
     use_synonyms: bool = field(
         default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
     )
+    reload_dataset: bool = field(
+        default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
+    )
     preprocessing_num_workers: Optional[int] = field(
         default=None,
         metadata={"help": "The number of processes to use for the preprocessing."},
@@ -166,61 +161,6 @@ class DataTrainingArguments:
             assert extension in ["csv", "json"], "`validation_file` should be a csv or a json file."
 
 
-@dataclass
-class DataCollatorForChID:
-    """
-    Data collator that will dynamically pad the inputs.
-    Candidate masks will be computed to indicate which tokens are candidates.
-
-    Args:
-        tokenizer ([`PreTrainedTokenizer`] or [`PreTrainedTokenizerFast`]):
-            The tokenizer used for encoding the data.
-        padding (`bool`, `str` or [`~utils.PaddingStrategy`], *optional*, defaults to `True`):
-            Select a strategy to pad the returned sequences (according to the model's padding side and padding index)
-            among:
-
-            - `True` or `'longest'`: Pad to the longest sequence in the batch (or no padding if only a single sequence
-              if provided).
-            - `'max_length'`: Pad to a maximum length specified with the argument `max_length` or to the maximum
-              acceptable input length for the model if that argument is not provided.
-            - `False` or `'do_not_pad'` (default): No padding (i.e., can output a batch with sequences of different
-              lengths).
-        max_length (`int`, *optional*):
-            Maximum length of the returned list and optionally padding length (see above).
-        pad_to_multiple_of (`int`, *optional*):
-            If set will pad the sequence to a multiple of the provided value.
-
-            This is especially useful to enable the use of Tensor Cores on NVIDIA hardware with compute capability >=
-            7.5 (Volta).
-    """
-
-    tokenizer: PreTrainedTokenizerBase
-    padding: Union[bool, str] = True
-    max_length: Optional[int] = None
-    pad_to_multiple_of: Optional[int] = None
-
-    def __call__(self, features):
-        try:
-            label_name = "label" if "label" in features[0].keys() else "labels"
-            labels = [feature.pop(label_name) for feature in features]
-        except:
-            label_name = "label" if "label" in features.keys() else "labels"
-            labels = features.pop(label_name)
-
-        batch = self.tokenizer.pad(
-            features,
-            padding=self.padding,
-            max_length=self.max_length,
-            pad_to_multiple_of=self.pad_to_multiple_of,
-            return_tensors="pt",
-        )
-
-
-        # Add back labels
-        batch["labels"] = torch.tensor(labels, dtype=torch.int64)
-        # Compute candidate masks
-        batch["candidate_mask"] = batch["input_ids"] == self.tokenizer.mask_token_id
-        return batch
 
 def main():
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
@@ -275,45 +215,7 @@ def main():
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
-    # Get the datasets: you can either provide your own CSV/JSON/TXT training and evaluation files (see below)
-    # or just provide the name of one of the public datasets available on the hub at https://huggingface.co/datasets/
-    # (the dataset will be downloaded automatically from the datasets Hub).
-
-    # For CSV/JSON files, this script will use the column called 'text' or the first column if no column called
-    # 'text' is found. You can easily tweak this behavior (see below).
-
-    # In distributed training, the load_dataset function guarantee that only one local process can concurrently
-    # download the dataset.
-    if data_args.train_file is not None or data_args.validation_file is not None:
-        data_files = {}
-        if data_args.train_file is not None:
-            data_files["train"] = data_args.train_file
-        if data_args.validation_file is not None:
-            data_files["validation"] = data_args.validation_file
-        if data_args.test_file is not None:
-            data_files["test"] = data_args.test_file
-        extension = data_args.train_file.split(".")[-1]
-        raw_datasets = load_dataset(
-            extension,
-            data_files=data_files,
-            cache_dir=model_args.cache_dir,
-            use_auth_token=True if model_args.use_auth_token else None,
-        )
-    else:
-        # Downloading and loading the chid dataset from the hub. This code is not supposed to be executed in.
-        raw_datasets = load_dataset(
-            "YuAnthony/chid",
-            cache_dir=model_args.cache_dir,
-            use_auth_token=True if model_args.use_auth_token else None,
-        )
-    # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
-    # https://huggingface.co/docs/datasets/loading_datasets.html.
-
-    # Load pretrained model and tokenizer
-
-    # Distributed training:
-    # The .from_pretrained methods guarantee that only one local process can concurrently
-    # download model & vocab.
+    
     config = AutoConfig.from_pretrained(
         model_args.config_name if model_args.config_name else model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
@@ -327,20 +229,7 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
-    # model = BertForChID.from_pretrained(
-    #     model_args.model_name_or_path,
-    #     from_tf=bool(".ckpt" in model_args.model_name_or_path),
-    #     config=config,
-    #     cache_dir=model_args.cache_dir,
-    #     revision=model_args.model_revision,
-    #     use_auth_token=True if model_args.use_auth_token else None,
-    # )
-    # _model_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # bert_encoder = BertModel(config, add_pooling_layer=False).to(_model_device)
     model = make_model(config, VOCAB_SIZE, VOCAB_SIZE, N=2)
-
-    label_column_name = "labels"
-    idiom_tag = '#idiom#'
 
     if data_args.max_seq_length is None:
         max_seq_length = tokenizer.model_max_length
@@ -359,131 +248,8 @@ def main():
         max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length)
 
     # Preprocessing the datasets.
+    train_data_loader, eval_data_loader, test_data_loader = get_dataset(tokenizer, max_seq_length, model_args, data_args, training_args, idiom_tag='#idiom#')
 
-    # We only consider one idiom per instance in the dataset, a sentence containing multiple idioms will be split into multiple instances.
-    # The idiom tag of each instance will be replaced with 4 [MASK] tokens.
-    def preprocess_function_resize(examples):
-        return_dic = {}
-        return_dic_keys = ['candidates', 'synonyms', 'synonyms_len', 'content', 'labels', 'labels_syn']
-        for k in return_dic_keys:
-            return_dic[k] = []
-
-        for i in range(len(examples['content'])):
-            idx = -1
-            text = examples['content'][i]
-            for j in range(examples['realCount'][i]):
-                idx = text.find(idiom_tag, idx+1)
-                return_dic['content'].append(text[:idx] + tokenizer.mask_token*4 + text[idx+len(idiom_tag):])
-                
-                # candidates
-                return_dic['candidates'].append(examples['candidates'][i][j])
-                for k, candidate in enumerate(examples['candidates'][i][j]):
-                    if candidate == examples['groundTruth'][i][j]:
-                        return_dic['labels'].append(k)
-                        break
-                    
-                # synonyms
-                examples['synonyms'][i][j] = [examples['groundTruth'][i][j]] + examples['synonyms'][i][j]
-                examples['synonyms'][i][j] = [exa for exa in examples['synonyms'][i][j] if len(exa)==4][:7]
-                random.shuffle(examples['synonyms'][i][j])
-                syn_len = len(examples['synonyms'][i][j])
-                examples['synonyms'][i][j] = (examples['synonyms'][i][j] + ["M"*4]*7)[:7]
-                
-                return_dic['synonyms'].append(examples['synonyms'][i][j])
-                return_dic['synonyms_len'].append(syn_len)
-                for k, candidate in enumerate(examples['synonyms'][i][j]):
-                    if candidate == examples['groundTruth'][i][j]:
-                        return_dic['labels_syn'].append(k)
-                        break
-        return return_dic
-
-    # tokenize all instances
-    def preprocess_function_tokenize(examples):
-        first_sentences = examples['content']
-        labels = examples["labels"]
-        labels_syn = examples["labels_syn"]
-        # truncate the first sentences.
-        for i, sentence in enumerate(first_sentences):
-            if len(sentence) <= 500:
-                continue
-            if sentence.find(tokenizer.mask_token*4) > len(sentence) // 2:
-                first_sentences[i] = sentence[-500:]
-            else:
-                first_sentences[i] = sentence[:500]
-                
-        tokenized_examples = tokenizer(
-            first_sentences,
-            max_length=max_seq_length,
-            padding="max_length" if data_args.pad_to_max_length else False,
-            truncation=True,
-        )
-        tokenized_examples["candidate_pos"] = [[l.index(tokenizer.mask_token_id)] for l in tokenized_examples["input_ids"]]
-        
-        # candidates
-        tokenized_examples["labels"] = labels
-        tokenized_candidates = [[tokenizer.convert_tokens_to_ids(list(candidate)) for candidate in candidates]for candidates in examples['candidates']]
-        tokenized_examples["candidates"] = tokenized_candidates
-        
-        # synonyms
-        tokenized_examples["labels_syn"] = labels_syn
-        tokenized_synonyms = [[tokenizer.convert_tokens_to_ids(list(synonym)) for synonym in synonyms]for synonyms in examples['synonyms']]
-        tokenized_examples["synonyms"] = tokenized_synonyms
-        
-        # Data collator
-        data_collator = DataCollatorForChID(tokenizer=tokenizer,  pad_to_multiple_of=8 if training_args.fp16 else None)
-    
-        data_set = data_collator(tokenized_examples.data).data
-        tokenized_examples['candidate_mask'] = data_set['candidate_mask'].tolist()
-        return tokenized_examples
-    
-    def generate_dataset(dataset, shuffle=False):
-        dataset = dataset.map(
-            preprocess_function_resize,
-            batched=True,
-            remove_columns=["groundTruth", "realCount", "explaination", "exp embedding"],
-            num_proc=data_args.preprocessing_num_workers,
-            load_from_cache_file=not data_args.overwrite_cache,
-        )
-
-        dataset = dataset.map(
-            preprocess_function_tokenize,
-            batched=True,
-            num_proc=data_args.preprocessing_num_workers,
-            load_from_cache_file=not data_args.overwrite_cache
-        )
-        data_set = {key:torch.tensor(dataset[:][key]) for key in tqdm(dataset[0].keys()) if key != 'content'}
-        dataset = TensorDataset(data_set['input_ids'], data_set['token_type_ids'], data_set['attention_mask'], data_set['candidates'], data_set['synonyms'], data_set['synonyms_len'], data_set['labels'], data_set['labels_syn'], data_set['candidate_mask'], data_set['candidate_pos'])
-        data_loader = DataLoader(dataset, batch_size=training_args.per_device_train_batch_size, shuffle=shuffle)
-        return data_loader
-    
-    
-    if training_args.do_train:
-        if "train" not in raw_datasets:
-            raise ValueError("--do_train requires a train dataset")
-        train_dataset = raw_datasets["train"]
-        if data_args.max_train_samples is not None:
-            max_train_samples = min(len(train_dataset), data_args.max_train_samples)
-            train_dataset = train_dataset.select(range(max_train_samples))
-        with training_args.main_process_first(desc="train dataset map pre-processing"):
-            train_data_loader = generate_dataset(train_dataset, shuffle=True)
-            
-    if training_args.do_eval:
-        if "validation" not in raw_datasets:
-            raise ValueError("--do_eval requires a validation dataset")
-        eval_dataset = raw_datasets["validation"]
-        if data_args.max_eval_samples is not None:
-            max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
-            eval_dataset = eval_dataset.select(range(max_eval_samples))
-        with training_args.main_process_first(desc="validation dataset map pre-processing"):
-            eval_data_loader = generate_dataset(eval_dataset)
-        test_dataset = raw_datasets["test"]
-        with training_args.main_process_first(desc="test dataset map pre-processing"):
-            test_data_loader = generate_dataset(test_dataset)
-    
-
-
-
-    
     model.to(model._model_device)
     param_optimizer = list(model.named_parameters())
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
