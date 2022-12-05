@@ -23,8 +23,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from typing import Optional
-import random
-from tqdm import tqdm, trange
+import time
 os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 import datasets
@@ -109,6 +108,9 @@ class DataTrainingArguments:
     )
     reload_dataset: bool = field(
         default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
+    )
+    decoder_layer_num: int = field(
+        default=0, metadata={"help": "Overwrite the cached training and evaluation sets"}
     )
     preprocessing_num_workers: Optional[int] = field(
         default=None,
@@ -229,7 +231,7 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
-    model = make_model(config, VOCAB_SIZE, VOCAB_SIZE, N=2)
+    model = make_model(config, VOCAB_SIZE, VOCAB_SIZE, N=data_args.decoder_layer_num)
 
     if data_args.max_seq_length is None:
         max_seq_length = tokenizer.model_max_length
@@ -248,24 +250,27 @@ def main():
         max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length)
 
     # Preprocessing the datasets.
+    start = time.time()
+    print("start loading dataset...")
     train_data_loader, eval_data_loader, test_data_loader = get_dataset(tokenizer, max_seq_length, model_args, data_args, training_args, idiom_tag='#idiom#')
-
+    print("finish loading dataset, use time: {}".format(time.time()-start))
+    
     model.to(model._model_device)
-    param_optimizer = list(model.named_parameters())
-    no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    optimizer_grouped_parameters = [
-        {'params': [p for n, p in param_optimizer
-                    if not any(nd in n for nd in no_decay) and 'encoder' in n], 'weight_decay': 0.01, 'lr': 5e-5},
-        {'params': [p for n, p in param_optimizer
-                    if any(nd in n for nd in no_decay) and 'encoder' in n], 'weight_decay': 0.0, 'lr': 5e-5},
-        {'params': [p for n, p in param_optimizer
-                    if not any(nd in n for nd in no_decay) and 'encoder' not in n], 'weight_decay': 0.01, 'lr': training_args.learning_rate},
-        {'params': [p for n, p in param_optimizer
-                    if any(nd in n for nd in no_decay) and 'encoder' not in n], 'weight_decay': 0.0, 'lr': training_args.learning_rate}
-    ]
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, training_args.learning_rate)
+    # param_optimizer = list(model.named_parameters())
+    # no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+    # optimizer_grouped_parameters = [
+    #     {'params': [p for n, p in param_optimizer
+    #                 if not any(nd in n for nd in no_decay) and 'encoder' in n], 'weight_decay': 0.01, 'lr': 5e-5},
+    #     {'params': [p for n, p in param_optimizer
+    #                 if any(nd in n for nd in no_decay) and 'encoder' in n], 'weight_decay': 0.0, 'lr': 5e-5},
+    #     {'params': [p for n, p in param_optimizer
+    #                 if not any(nd in n for nd in no_decay) and 'encoder' not in n], 'weight_decay': 0.01, 'lr': training_args.learning_rate},
+    #     {'params': [p for n, p in param_optimizer
+    #                 if any(nd in n for nd in no_decay) and 'encoder' not in n], 'weight_decay': 0.0, 'lr': training_args.learning_rate}
+    # ]
+    # optimizer = torch.optim.AdamW(optimizer_grouped_parameters, training_args.learning_rate)
     # optimizer = torch.optim.AdamW(model.parameters(), training_args.learning_rate)
-    # optimizer = torch.optim.Adam(params = model.parameters(),lr=training_args.learning_rate)
+    optimizer = torch.optim.Adam(params = model.parameters(),lr=training_args.learning_rate)
     # lr_scheduler = LambdaLR(
     #     optimizer=optimizer,
     #     lr_lambda=lambda step: rate(

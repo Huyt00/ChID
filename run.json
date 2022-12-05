@@ -7,7 +7,7 @@
     "test_file": "ChID_new/test_data.json",
     "metric_for_best_model": "eval_accuracy",
     "load_best_model_at_end": 1,
-    "learning_rate": 1e-3,
+    "learning_rate": 5e-5,
     "evaluation_strategy": "epoch",
     "num_train_epochs": 10,
     "output_dir": "./output",
@@ -19,6 +19,7 @@
     "save_strategy": "epoch",
     "overwrite_output_dir": 1,
     "overwrite_cache": 1,
-    "reload_dataset": 1,
+    "reload_dataset": 0,
+    "decoder_layer_num": 2,
     "use_synonyms": 0
 }
