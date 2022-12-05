@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Union
 import random
 from tqdm import tqdm, trange
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import datasets
 import numpy as np
@@ -417,6 +417,8 @@ def main():
             padding="max_length" if data_args.pad_to_max_length else False,
             truncation=True,
         )
+        tokenized_examples["candidate_pos"] = [[l.index(tokenizer.mask_token_id)] for l in tokenized_examples["input_ids"]]
+        
         # candidates
         tokenized_examples["labels"] = labels
         tokenized_candidates = [[tokenizer.convert_tokens_to_ids(list(candidate)) for candidate in candidates]for candidates in examples['candidates']]
@@ -450,7 +452,7 @@ def main():
             load_from_cache_file=not data_args.overwrite_cache
         )
         data_set = {key:torch.tensor(dataset[:][key]) for key in tqdm(dataset[0].keys()) if key != 'content'}
-        dataset = TensorDataset(data_set['input_ids'], data_set['token_type_ids'], data_set['attention_mask'], data_set['candidates'], data_set['synonyms'], data_set['synonyms_len'], data_set['labels'], data_set['labels_syn'], data_set['candidate_mask'])
+        dataset = TensorDataset(data_set['input_ids'], data_set['token_type_ids'], data_set['attention_mask'], data_set['candidates'], data_set['synonyms'], data_set['synonyms_len'], data_set['labels'], data_set['labels_syn'], data_set['candidate_mask'], data_set['candidate_pos'])
         data_loader = DataLoader(dataset, batch_size=training_args.per_device_train_batch_size, shuffle=shuffle)
         return data_loader
     
