@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Union
 import random
 from tqdm import tqdm, trange
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import datasets
 import numpy as np
@@ -434,7 +434,7 @@ def main():
         tokenized_examples['candidate_mask'] = data_set['candidate_mask'].tolist()
         return tokenized_examples
     
-    def generate_dataset(dataset):
+    def generate_dataset(dataset, shuffle=False):
         dataset = dataset.map(
             preprocess_function_resize,
             batched=True,
@@ -451,10 +451,10 @@ def main():
         )
         data_set = {key:torch.tensor(dataset[:][key]) for key in tqdm(dataset[0].keys()) if key != 'content'}
         dataset = TensorDataset(data_set['input_ids'], data_set['token_type_ids'], data_set['attention_mask'], data_set['candidates'], data_set['synonyms'], data_set['synonyms_len'], data_set['labels'], data_set['labels_syn'], data_set['candidate_mask'])
-        data_loader = DataLoader(dataset, batch_size=training_args.per_device_train_batch_size, shuffle=True)
+        data_loader = DataLoader(dataset, batch_size=training_args.per_device_train_batch_size, shuffle=shuffle)
         return data_loader
     
-    keys = ['input_ids', 'token_type_ids', 'attention_mask', 'candidates', 'synonyms', 'synonyms_len', 'labels', 'labels_syn', 'candidate_mask']
+    
     if training_args.do_train:
         if "train" not in raw_datasets:
             raise ValueError("--do_train requires a train dataset")
@@ -463,7 +463,7 @@ def main():
             max_train_samples = min(len(train_dataset), data_args.max_train_samples)
             train_dataset = train_dataset.select(range(max_train_samples))
         with training_args.main_process_first(desc="train dataset map pre-processing"):
-            train_data_loader = generate_dataset(train_dataset)
+            train_data_loader = generate_dataset(train_dataset, shuffle=True)
             
     if training_args.do_eval:
         if "validation" not in raw_datasets:
@@ -483,7 +483,21 @@ def main():
 
     
     model.to(model._model_device)
-    optimizer = torch.optim.Adam(params = model.parameters(),lr=training_args.learning_rate)
+    param_optimizer = list(model.named_parameters())
+    no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in param_optimizer
+                    if not any(nd in n for nd in no_decay) and 'encoder' in n], 'weight_decay': 0.01, 'lr': 5e-5},
+        {'params': [p for n, p in param_optimizer
+                    if any(nd in n for nd in no_decay) and 'encoder' in n], 'weight_decay': 0.0, 'lr': 5e-5},
+        {'params': [p for n, p in param_optimizer
+                    if not any(nd in n for nd in no_decay) and 'encoder' not in n], 'weight_decay': 0.01, 'lr': training_args.learning_rate},
+        {'params': [p for n, p in param_optimizer
+                    if any(nd in n for nd in no_decay) and 'encoder' not in n], 'weight_decay': 0.0, 'lr': training_args.learning_rate}
+    ]
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, training_args.learning_rate)
+    # optimizer = torch.optim.AdamW(model.parameters(), training_args.learning_rate)
+    # optimizer = torch.optim.Adam(params = model.parameters(),lr=training_args.learning_rate)
     # lr_scheduler = LambdaLR(
     #     optimizer=optimizer,
     #     lr_lambda=lambda step: rate(
@@ -519,7 +533,7 @@ def main():
             print(f"Epoch {epoch} Validation ====", flush=True)
             model.eval()
             with torch.no_grad():
-                sloss, acc = run_epoch(
+                _, acc = run_epoch(
                     eval_data_loader,
                     model,
                     SimpleLossCompute(model.generator, criterion),
@@ -527,7 +541,7 @@ def main():
                     DummyScheduler(),
                     mode="eval",
                 )
-                print(("loss: %6.2f, acc: %6.2f") % (sloss.item(), acc))
+                print(("acc: %6.2f") % (acc))
             torch.cuda.empty_cache()
             
         
@@ -537,15 +551,16 @@ def main():
         logger.info("*** TEST ***")
 
         model.eval()
-        sloss = run_epoch(
+        _, acc = run_epoch(
             test_data_loader,
             model,
             SimpleLossCompute(model.generator, criterion),
             DummyOptimizer(),
             DummyScheduler(),
-            mode="eval",
+            mode="test",
         )
-        print(sloss)
+        print(("acc: %6.2f") % (acc))
+        torch.cuda.empty_cache()
     
 
 def _mp_fn(index):
