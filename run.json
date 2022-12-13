@@ -2,7 +2,7 @@
     "model_name_or_path": "hfl/chinese-roberta-wwm-ext",
     "do_train": 1,
     "do_eval": 1,
-    "train_file": "ChID_new/train_data_1w.json",
+    "train_file": "ChID_new/train_data.json",
     "validation_file": "ChID_new/dev_data.json",
     "test_file": "ChID_new/test_data.json",
     "metric_for_best_model": "eval_accuracy",
@@ -20,6 +20,6 @@
     "overwrite_output_dir": 1,
     "overwrite_cache": 1,
     "reload_dataset": 0,
-    "decoder_layer_num": 2,
+    "decoder_layer_num": 1,
     "use_synonyms": 0
 }

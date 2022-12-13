@@ -18,19 +18,10 @@ Fine-tuning the library models for ChID.
 """
 
 
-import logging
 import os
-import sys
-from dataclasses import dataclass, field
-from typing import Optional
-import time
 os.environ["CUDA_VISIBLE_DEVICES"] = "2"
-
-import datasets
-import torch
-from torch.optim.lr_scheduler import LambdaLR
-
-import transformers
+from util import *
+from transformers.trainer_utils import get_last_checkpoint
 from transformers import (
     AutoConfig,
     AutoTokenizer,
@@ -38,9 +29,16 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
-from transformers.trainer_utils import get_last_checkpoint
-from util import *
-
+from transformers import AdamW, get_linear_schedule_with_warmup
+import transformers
+from torch.optim.lr_scheduler import LambdaLR
+import torch
+import datasets
+import logging
+import sys
+from dataclasses import dataclass, field
+from typing import Optional
+import time
 
 
 logger = logging.getLogger(__name__)
@@ -54,7 +52,8 @@ class ModelArguments:
     """
 
     model_name_or_path: str = field(
-        metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
+        metadata={
+            "help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
     config_name: Optional[str] = field(
         default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
@@ -64,15 +63,18 @@ class ModelArguments:
     )
     cache_dir: Optional[str] = field(
         default=None,
-        metadata={"help": "Where do you want to store the pretrained models downloaded from huggingface.co"},
+        metadata={
+            "help": "Where do you want to store the pretrained models downloaded from huggingface.co"},
     )
     use_fast_tokenizer: bool = field(
         default=True,
-        metadata={"help": "Whether to use one of the fast tokenizer (backed by the tokenizers library) or not."},
+        metadata={
+            "help": "Whether to use one of the fast tokenizer (backed by the tokenizers library) or not."},
     )
     model_revision: str = field(
         default="main",
-        metadata={"help": "The specific model version to use (can be a branch name, tag name or commit id)."},
+        metadata={
+            "help": "The specific model version to use (can be a branch name, tag name or commit id)."},
     )
     use_auth_token: bool = field(
         default=False,
@@ -91,10 +93,12 @@ class DataTrainingArguments:
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
 
-    train_file: Optional[str] = field(default=None, metadata={"help": "The input training data file (a text file)."})
+    train_file: Optional[str] = field(
+        default=None, metadata={"help": "The input training data file (a text file)."})
     validation_file: Optional[str] = field(
         default=None,
-        metadata={"help": "An optional input evaluation data file (a text file)."},
+        metadata={
+            "help": "An optional input evaluation data file (a text file)."},
     )
     test_file: Optional[str] = field(
         default=None,
@@ -111,6 +115,9 @@ class DataTrainingArguments:
     )
     decoder_layer_num: int = field(
         default=0, metadata={"help": "Overwrite the cached training and evaluation sets"}
+    )
+    warmup_proportion: float = field(
+        default=0.1, metadata={"help": "Overwrite the cached training and evaluation sets"}
     )
     preprocessing_num_workers: Optional[int] = field(
         default=None,
@@ -157,11 +164,12 @@ class DataTrainingArguments:
     def __post_init__(self):
         if self.train_file is not None:
             extension = self.train_file.split(".")[-1]
-            assert extension in ["csv", "json"], "`train_file` should be a csv or a json file."
+            assert extension in [
+                "csv", "json"], "`train_file` should be a csv or a json file."
         if self.validation_file is not None:
             extension = self.validation_file.split(".")[-1]
-            assert extension in ["csv", "json"], "`validation_file` should be a csv or a json file."
-
+            assert extension in [
+                "csv", "json"], "`validation_file` should be a csv or a json file."
 
 
 def main():
@@ -170,14 +178,15 @@ def main():
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
+    parser = HfArgumentParser(
+        (ModelArguments, DataTrainingArguments, TrainingArguments))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]), allow_extra_keys=True)
+        model_args, data_args, training_args = parser.parse_json_file(
+            json_file=os.path.abspath(sys.argv[1]), allow_extra_keys=True)
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
 
     # Setup logging
     logging.basicConfig(
@@ -217,7 +226,6 @@ def main():
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
-    
     config = AutoConfig.from_pretrained(
         model_args.config_name if model_args.config_name else model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
@@ -231,7 +239,7 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
-    model = make_model(config, VOCAB_SIZE, VOCAB_SIZE, N=data_args.decoder_layer_num)
+    model = make_model(model_args, config, N=data_args.decoder_layer_num)
 
     if data_args.max_seq_length is None:
         max_seq_length = tokenizer.model_max_length
@@ -247,37 +255,48 @@ def main():
                 f"The max_seq_length passed ({data_args.max_seq_length}) is larger than the maximum length for the"
                 f"model ({tokenizer.model_max_length}). Using max_seq_length={tokenizer.model_max_length}."
             )
-        max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length)
+        max_seq_length = min(data_args.max_seq_length,
+                             tokenizer.model_max_length)
 
     # Preprocessing the datasets.
     start = time.time()
     print("start loading dataset...")
-    train_data_loader, eval_data_loader, test_data_loader = get_dataset(tokenizer, max_seq_length, model_args, data_args, training_args, idiom_tag='#idiom#')
+    train_data_loader, eval_data_loader, test_data_loader = get_dataset(
+        tokenizer, max_seq_length, model_args, data_args, training_args, idiom_tag='#idiom#')
     print("finish loading dataset, use time: {}".format(time.time()-start))
-    
+
     model.to(model._model_device)
-    # param_optimizer = list(model.named_parameters())
-    # no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    # optimizer_grouped_parameters = [
-    #     {'params': [p for n, p in param_optimizer
-    #                 if not any(nd in n for nd in no_decay) and 'encoder' in n], 'weight_decay': 0.01, 'lr': 5e-5},
-    #     {'params': [p for n, p in param_optimizer
-    #                 if any(nd in n for nd in no_decay) and 'encoder' in n], 'weight_decay': 0.0, 'lr': 5e-5},
-    #     {'params': [p for n, p in param_optimizer
-    #                 if not any(nd in n for nd in no_decay) and 'encoder' not in n], 'weight_decay': 0.01, 'lr': training_args.learning_rate},
-    #     {'params': [p for n, p in param_optimizer
-    #                 if any(nd in n for nd in no_decay) and 'encoder' not in n], 'weight_decay': 0.0, 'lr': training_args.learning_rate}
-    # ]
-    # optimizer = torch.optim.AdamW(optimizer_grouped_parameters, training_args.learning_rate)
+    if torch.cuda.device_count() > 1:
+        model = torch.nn.DataParallel(model)
+        
+    param_optimizer = list(model.named_parameters())
+    no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in param_optimizer
+                    if not any(nd in n for nd in no_decay) and 'encoder' in n], 'weight_decay': 0.01, 'lr': 1e-5},
+        {'params': [p for n, p in param_optimizer
+                    if any(nd in n for nd in no_decay) and 'encoder' in n], 'weight_decay': 0.0, 'lr': 1e-5},
+        {'params': [p for n, p in param_optimizer
+                    if not any(nd in n for nd in no_decay) and 'encoder' not in n], 'weight_decay': 0.01, 'lr': training_args.learning_rate},
+        {'params': [p for n, p in param_optimizer
+                    if any(nd in n for nd in no_decay) and 'encoder' not in n], 'weight_decay': 0.0, 'lr': training_args.learning_rate}
+    ]
+    optimizer = torch.optim.AdamW(
+        optimizer_grouped_parameters, training_args.learning_rate)
     # optimizer = torch.optim.AdamW(model.parameters(), training_args.learning_rate)
-    optimizer = torch.optim.Adam(params = model.parameters(),lr=training_args.learning_rate)
+    # optimizer = torch.optim.Adam(params = model.parameters(),lr=training_args.learning_rate)
     # lr_scheduler = LambdaLR(
     #     optimizer=optimizer,
     #     lr_lambda=lambda step: rate(
     #         step, model_size=model.src_embed[0].d_model, factor=1.0, warmup=400
     #     ),
     # )
-    lr_scheduler = None
+    # lr_scheduler = None
+
+    num_train_optimization_steps = len(train_data_loader) * training_args.num_train_epochs
+    lr_scheduler = get_linear_schedule_with_warmup(optimizer, 
+                                                   int(num_train_optimization_steps * data_args.warmup_proportion), num_train_optimization_steps)
+    # lr_scheduler = None
     criterion = LabelSmoothing(size=7, padding_idx=0, smoothing=0.0)
 
     # Training
@@ -290,17 +309,16 @@ def main():
             checkpoint = training_args.resume_from_checkpoint
         elif last_checkpoint is not None:
             checkpoint = last_checkpoint
-        
-        
+
         for epoch in range(training_args.num_train_epochs):
             model.train()
-            run_epoch(train_data_loader, 
-                    model, 
-                    SimpleLossCompute(model.generator, criterion),
-                    optimizer,
-                    lr_scheduler,
-                    mode="train",
-                    )
+            run_epoch(train_data_loader,
+                      model,
+                      SimpleLossCompute(model.generator, criterion),
+                      optimizer,
+                      lr_scheduler,
+                      mode="train",
+                      )
             torch.cuda.empty_cache()
 
             print(f"Epoch {epoch} Validation ====", flush=True)
@@ -314,27 +332,26 @@ def main():
                     DummyScheduler(),
                     mode="eval",
                 )
-                print(("acc: %6.2f") % (acc))
+                print(("acc: %6.5f") % (acc))
             torch.cuda.empty_cache()
-            
-        
-        
-    # Evaluation
-    if training_args.do_eval:
-        logger.info("*** TEST ***")
 
-        model.eval()
-        _, acc = run_epoch(
-            test_data_loader,
-            model,
-            SimpleLossCompute(model.generator, criterion),
-            DummyOptimizer(),
-            DummyScheduler(),
-            mode="test",
-        )
-        print(("acc: %6.2f") % (acc))
-        torch.cuda.empty_cache()
-    
+            # Evaluation
+            if training_args.do_eval:
+                logger.info("*** TEST ***")
+
+                model.eval()
+                with torch.no_grad():
+                    _, acc = run_epoch(
+                        test_data_loader,
+                        model,
+                        SimpleLossCompute(model.generator, criterion),
+                        DummyOptimizer(),
+                        DummyScheduler(),
+                        mode="test",
+                    )
+                    print(("acc: %6.5f") % (acc))
+                torch.cuda.empty_cache()
+
 
 def _mp_fn(index):
     # For xla_spawn (TPUs)

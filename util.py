@@ -216,26 +216,31 @@ def get_dataset(tokenizer, max_seq_length, model_args, data_args, training_args,
                 train_dataset = train_dataset.select(range(max_train_samples))
             with training_args.main_process_first(desc="train dataset map pre-processing"):
                 train_data_loader = generate_dataset(train_dataset, shuffle=True)
-                
-        if training_args.do_eval:
-            if "validation" not in raw_datasets:
-                raise ValueError("--do_eval requires a validation dataset")
-            eval_dataset = raw_datasets["validation"]
-            if data_args.max_eval_samples is not None:
-                max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
-                eval_dataset = eval_dataset.select(range(max_eval_samples))
-            with training_args.main_process_first(desc="validation dataset map pre-processing"):
-                eval_data_loader = generate_dataset(eval_dataset)
-            test_dataset = raw_datasets["test"]
-            with training_args.main_process_first(desc="test dataset map pre-processing"):
-                test_data_loader = generate_dataset(test_dataset)
+         
+        # if training_args.do_eval:
+        #     if "validation" not in raw_datasets:
+        #         raise ValueError("--do_eval requires a validation dataset")
+        #     eval_dataset = raw_datasets["validation"]
+        #     if data_args.max_eval_samples is not None:
+        #         max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
+        #         eval_dataset = eval_dataset.select(range(max_eval_samples))
+        #     with training_args.main_process_first(desc="validation dataset map pre-processing"):
+        #         eval_data_loader = generate_dataset(eval_dataset)
+        #     test_dataset = raw_datasets["test"]
+        #     with training_args.main_process_first(desc="test dataset map pre-processing"):
+        #         test_data_loader = generate_dataset(test_dataset)
 
         with open(data_args.train_file[:-4]+'pkl','wb') as f:
             dill.dump(train_data_loader, f)
-        with open(data_args.validation_file[:-4]+'pkl','wb') as f:
-            dill.dump(eval_data_loader, f)
-        with open(data_args.test_file[:-4]+'pkl','wb') as f:
-            dill.dump(test_data_loader, f)
+        # with open(data_args.validation_file[:-4]+'pkl','wb') as f:
+        #     dill.dump(eval_data_loader, f)
+        # with open(data_args.test_file[:-4]+'pkl','wb') as f:
+        #     dill.dump(test_data_loader, f)
+        with open(data_args.validation_file[:-4]+'pkl','rb') as f:
+            eval_data_loader = dill.load(f)
+        with open(data_args.test_file[:-4]+'pkl','rb') as f:
+            test_data_loader = dill.load(f)
+
     else:
         with open(data_args.train_file[:-4]+'pkl','rb') as f:
             train_data_loader = dill.load(f)
@@ -284,13 +289,13 @@ class SimpleLossCompute:
         self.generator = generator
         self.criterion = criterion
 
-    def __call__(self, outputs, candidates, candidate_mask, labels=None, vocab_len=4):
+    def __call__(self, outputs, candidates, labels=None, vocab_len=4):
         prediction_scores = self.generator(outputs)
         norm = outputs.size(0)*vocab_len
         
         loss_fct = CrossEntropyLoss() 
-        mask_prediction_scores = torch.masked_select(prediction_scores, candidate_mask.unsqueeze(-1)).reshape(-1, prediction_scores.shape[-1], 1) # (Batch_size x 4, Vocab_size, 1)
-        # mask_prediction_scores = prediction_scores.reshape(-1, prediction_scores.shape[-1], 1) # (Batch_size x 4, Vocab_size, 1)
+        # mask_prediction_scores = torch.masked_select(prediction_scores, candidate_mask.unsqueeze(-1)).reshape(-1, prediction_scores.shape[-1], 1) # (Batch_size x 4, Vocab_size, 1)
+        mask_prediction_scores = prediction_scores.reshape(-1, prediction_scores.shape[-1], 1) # (Batch_size x 4, Vocab_size, 1)
        
         candidate_indices = candidates.transpose(-1, -2).reshape(-1, candidates.shape[1]) # (Batch_size x 4, num_choices)
         candidate_logits = batched_index_select(mask_prediction_scores, candidate_indices).squeeze(-1).reshape(prediction_scores.shape[0], vocab_len, -1) # (Batch_size, 4, num_choices)
@@ -302,7 +307,7 @@ class SimpleLossCompute:
         candidate_labels = labels.reshape(labels.shape[0], 1).repeat(1, vocab_len) # (Batch_size, 4)
         masked_lm_loss = loss_fct(candidate_logits.transpose(-2, -1), candidate_labels)
         
-        return masked_lm_loss * norm, masked_lm_loss, final_scores
+        return masked_lm_loss, masked_lm_loss, final_scores
         
         sloss = (
             self.criterion(
@@ -428,44 +433,7 @@ class BertForChID(BertPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-        sequence_output = outputs[0]
-        prediction_scores = self.cls(sequence_output) # (Batch_size, Seq_len, Vocab_size)
-
-        masked_lm_loss = None
-        if labels is not None:
-            loss_fct = CrossEntropyLoss() 
-            mask_prediction_scores = torch.masked_select(prediction_scores, candidate_mask.unsqueeze(-1)).reshape(-1, prediction_scores.shape[-1], 1) # (Batch_size x 4, Vocab_size, 1)
-            
-            # candidate
-            candidate_indices = candidates.transpose(-1, -2).reshape(-1, candidates.shape[1]) # (Batch_size x 4, num_choices)
-            candidate_logits = batched_index_select(mask_prediction_scores, candidate_indices).squeeze(-1).reshape(prediction_scores.shape[0], 4, -1).transpose(-1, -2) # (Batch_size, num_choices, 4)
-
-            candidate_labels = labels.reshape(labels.shape[0], 1).repeat(1, 4) # (Batch_size, 4)
-            final_scores = torch.sum(F.log_softmax(candidate_logits, dim=-2), dim=-1) # (Batch_size, num_choices)
-            masked_lm_loss = loss_fct(candidate_logits, candidate_labels)
-            
-            # synonyms
-            if use_synonyms:
-                synonyms_indices = synonyms.transpose(-1, -2).reshape(-1, synonyms.shape[1]) # (Batch_size x 4, num_choices)
-                synonyms_logits = batched_index_select(mask_prediction_scores, synonyms_indices).squeeze(-1).reshape(prediction_scores.shape[0], 4, -1).transpose(-1, -2) # (Batch_size, num_choices, 4)
-
-                synonyms_labels = labels_syn.reshape(labels_syn.shape[0], 1).repeat(1, 4) # (Batch_size, 4)
-                synonyms_final_scores = torch.sum(F.log_softmax(synonyms_logits, dim=-2), dim=-1) # (Batch_size, num_choices)
-                masked_lm_loss += self.syn_loss_rate*loss_fct(synonyms_logits, synonyms_labels)
-                final_scores = torch.cat((final_scores, synonyms_final_scores), dim=0)
-
-
-        if not return_dict:
-            output = (prediction_scores,) + outputs[2:]
-            return ((masked_lm_loss,) + output) if masked_lm_loss is not None else output
-
-        
-        return MaskedLMOutput(
-            loss=masked_lm_loss,
-            logits=final_scores,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
+        return outputs[0]
         
 
 class EncoderDecoder(nn.Module):
@@ -481,17 +449,15 @@ class EncoderDecoder(nn.Module):
         self.generator = encoder.cls
         self._model_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    def forward(self, src, tgt, src_mask, tgt_mask, input):
+    def forward(self, src, tgt, src_mask, tgt_mask):
         "Take in and process masked src and target sequences."
-        return self.decode(self.encode(src, src_mask, input), src_mask, tgt, tgt_mask)
+        return self.decode(self.encode(src, src_mask), src_mask, tgt, tgt_mask)
 
-    def encode(self, src, src_mask, input):
-        return self.encoder(**input)
+    def encode(self, src, src_mask):
+        return self.encoder(src, src_mask)
 
     def decode(self, memory, src_mask, tgt, tgt_mask):
-        return memory
         tgt_emb = torch.masked_select(memory, tgt.unsqueeze(-1)).reshape(tgt.size(0), 4, -1)
-        return tgt_emb
         src_mask_ = src_mask * (1 - tgt.type_as(src_mask))
         return self.decoder(tgt_emb, memory, src_mask_.unsqueeze(1), tgt_mask)
 
@@ -691,11 +657,10 @@ def make_model(
 
     # This was important from their code.
     # Initialize parameters with Glorot / fan_avg.
-    # for p in model.parameters():
-    #     if p.dim() > 1:
-    #         nn.init.xavier_uniform_(p)
+    for p in model.decoder.parameters():
+        if p.dim() > 1:
+            nn.init.xavier_uniform_(p)
     
-    # EncoderDecoder.encoder = bert
     return model
 
 def run_epoch(
@@ -734,16 +699,14 @@ def run_epoch(
         tgt_mask = make_std_mask(torch.zeros(batch_size, 4).type_as(src))
         # can_mask = input['candidate_mask']
         out = model(
-            src, tgt, src_mask, tgt_mask, input
+            src, tgt, src_mask, tgt_mask
         )
-        # tgt_y = input['candidates']
-        # labels = input['labels']
-        # # if mode == "train" or mode == "train+log":
-        # loss_node, loss, logits = loss_compute(out, tgt_y, input['candidate_mask'], labels=labels)
-        # # else:
-        # #     loss, loss_node, logits = loss_compute(out[:, 0, :], tgt_y[:, :, 0], labels=labels, vocab_len=1)
-        loss = out.loss
-        logits = out.logits
+        tgt_y = input['candidates']
+        labels = input['labels']
+        # if mode == "train" or mode == "train+log":
+        _, loss, logits = loss_compute(out, tgt_y, labels=labels)
+        # else:
+        #     loss, loss_node, logits = loss_compute(out[:, 0, :], tgt_y[:, :, 0], labels=labels, vocab_len=1)
         labels = input['labels']
         metrics = compute_metrics((logits, labels))
         # loss_node = loss_node / accum_iter
@@ -751,8 +714,8 @@ def run_epoch(
         if mode == "train" or mode == "train+log":
             loss.backward()
             optimizer.step()
+            scheduler.step()
             optimizer.zero_grad()
-            # scheduler.step()
 
         total_loss += loss
         total_correct += metrics["accuracy"]
@@ -763,7 +726,7 @@ def run_epoch(
             print(
                 (
                     "Epoch Step: %6d | Loss: %6.2f "
-                    + "| Step / Sec: %7.1f | Accuracy: %6.2f"
+                    + "| Step / Sec: %7.1f | Accuracy: %6.5f"
                 )
                 % (i, loss, total_num / elapsed, metrics["accuracy"])
             )
