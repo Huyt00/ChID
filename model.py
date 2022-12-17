@@ -27,8 +27,17 @@ class BertForChID(BertPreTrainedModel):
         self.bert = BertModel(config, add_pooling_layer=False)
         self.cls = BertOnlyMLMHead(config)
         self._model_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.syn_loss_rate = 0.1
+        self.syn_loss_rate = 0.5
+
+        # 全连接层，用于训练
+        self.input_len = 768 # 网络输入层的大小 21128 768
+        self.times = 2 # 网络中间层的放大倍数
+        self.hidden1 = torch.nn.Linear(self.input_len, self.times*self.input_len)
+        # self.hidden2 = torch.nn.Linear(self.times*self.input_len, self.times*self.input_len)
+        # self.hidden3 = torch.nn.Linear(self.times*self.input_len, self.times*self.input_len)
+        self.output = torch.nn.Linear(self.times*self.input_len, self.input_len)
         
+        self.relu = torch.nn.ReLU()
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -76,6 +85,7 @@ class BertForChID(BertPreTrainedModel):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        # with torch.no_grad():
         outputs = self.bert(
             input_ids,
             attention_mask=attention_mask,
@@ -91,15 +101,34 @@ class BertForChID(BertPreTrainedModel):
         )
 
         sequence_output = outputs[0]
+            
+            # MLP
+        sequence_output = self.relu(self.hidden1(sequence_output))
+        sequence_output = self.relu(self.output(sequence_output))
+        
         prediction_scores = self.cls(sequence_output) # (Batch_size, Seq_len, Vocab_size)
+
 
         masked_lm_loss = None
         if labels is not None:
             loss_fct = CrossEntropyLoss() 
             mask_prediction_scores = torch.masked_select(prediction_scores, candidate_mask.unsqueeze(-1)).reshape(-1, prediction_scores.shape[-1], 1) # (Batch_size x 4, Vocab_size, 1)
+
+            ################# MLP #################
+            # mask_prediction_scores = torch.masked_select(prediction_scores, candidate_mask.unsqueeze(-1)).reshape(-1, prediction_scores.shape[-1])  # [batch_size*4, 21128]
+            # # print("[INFO] mask_prediction_scores.shape: ", mask_prediction_scores.shape)
+            # # 以下参数与初始化参数配合用来训练网络
+            # mask_prediction_scores = F.gelu(self.hidden1(mask_prediction_scores))
+            # # mask_prediction_scores = F.gelu(self.hidden2(mask_prediction_scores))
+            # # mask_prediction_scores = F.gelu(self.hidden3(mask_prediction_scores))
+            # mask_prediction_scores = self.output(mask_prediction_scores)
+            # # 恢复成(Batch_size*4, Vocab_size, 1)的形式
+            # mask_prediction_scores = mask_prediction_scores.unsqueeze(-1)  # [batch_size*4, 21128, 1]
+            # # print("[INFO] mask_prediction_scores.shape: ", mask_prediction_scores.shape)
+            #######################################
             
             # candidate
-            candidate_indices = candidates.transpose(-1, -2).reshape(-1, candidates.shape[1]) # (Batch_size x 4, num_choices)
+            candidate_indices = candidates.transpose(-1, -2).reshape(-1, candidates.shape[1]).contiguous() # (Batch_size x 4, num_choices)
             candidate_logits = batched_index_select(mask_prediction_scores, candidate_indices).squeeze(-1).reshape(prediction_scores.shape[0], 4, -1).transpose(-1, -2) # (Batch_size, num_choices, 4)
 
             candidate_labels = labels.reshape(labels.shape[0], 1).repeat(1, 4) # (Batch_size, 4)
@@ -108,7 +137,7 @@ class BertForChID(BertPreTrainedModel):
             
             # synonyms
             if use_synonyms:
-                synonyms_indices = synonyms.transpose(-1, -2).reshape(-1, synonyms.shape[1]) # (Batch_size x 4, num_choices)
+                synonyms_indices = synonyms.transpose(-1, -2).reshape(-1, synonyms.shape[1]).contiguous() # (Batch_size x 4, num_choices)
                 synonyms_logits = batched_index_select(mask_prediction_scores, synonyms_indices).squeeze(-1).reshape(prediction_scores.shape[0], 4, -1).transpose(-1, -2) # (Batch_size, num_choices, 4)
 
                 synonyms_labels = labels_syn.reshape(labels_syn.shape[0], 1).repeat(1, 4) # (Batch_size, 4)
