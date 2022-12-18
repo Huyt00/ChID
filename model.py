@@ -146,7 +146,8 @@ class BertForChID(BertPreTrainedModel):
         print(sequence_output.shape)
         print(candidate_output.shape)
         '''
-        sim1 = torch.sum(sequence_output*candidate_output, dim=-1)
+        sim1 = 1 - torch.cosine_similarity(sequence_output, candidate_output, dim=-1)
+        # sim1 = torch.sum(sequence_output*candidate_output, dim=-1)
         score1 = sim1
         # score1 = torch.softmax(sim1, dim=-1)
         loss1 = self.loss_func(score1, labels.to(self._model_device))

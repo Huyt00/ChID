@@ -27,7 +27,7 @@ from typing import Optional, Union
 
 from tqdm import tqdm, trange
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import datasets
 import numpy as np
